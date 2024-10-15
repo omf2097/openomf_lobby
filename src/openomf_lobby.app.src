@@ -1,0 +1,20 @@
+{application,
+ openomf_lobby, 
+ [
+  {description, "Netplay lobby server for OpenOMF"},
+  {vsn, git},
+  {registered, []},
+  {mod, {openomf_lobby_app, []}},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  enet,
+                  lager
+                 ]},
+  {env, []},
+  {modules, []},
+  {maintainers, ["OpenOMF team"]},
+  {licenses, ["MIT"]},
+  {links,  ["http://openomf.org"]}
+ ]
+}.
