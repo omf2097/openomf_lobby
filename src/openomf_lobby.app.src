@@ -9,7 +9,8 @@
                   kernel,
                   stdlib,
                   enet,
-                  lager
+                  lager,
+	          hackney
                  ]},
   {env, []},
   {modules, []},
