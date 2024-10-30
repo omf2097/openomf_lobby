@@ -78,10 +78,10 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, 0:4/in
 		    %% confirm the join and tell the user their connect ID
 		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>),
 		    %% broadcast the user join...
-        PeerInfo = maps:put(external_port, ExtPort, maps:put(version, Version, maps:put(name, Name, State#state.peer_info))),
-		    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo, 1)),
+        PeerInfo2 = maps:put(external_port, ExtPort, maps:put(version, Version, maps:put(name, Name, State#state.peer_info))),
+		    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 1)),
 		    user_joined_event(Name),
-		    {noreply ,State#state{name = Name, version = Version, peer_info = PeerInfo}}
+		    {noreply ,State#state{name = Name, version = Version, peer_info = PeerInfo2}}
 	    catch _:_ ->
 		    %% user already registered
 		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, ?JOIN_FLAG_NAME_USED:4/integer, ConnectID:32/integer-unsigned-big>>),
