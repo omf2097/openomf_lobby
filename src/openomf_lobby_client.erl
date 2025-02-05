@@ -17,6 +17,7 @@
 -define(PACKET_DISCONNECT, 5).
 -define(PACKET_PRESENCE, 6).
 -define(PACKET_CONNECTED, 7).
+-define(PACKET_REFRESH, 8).
 
 -define(CHALLENGE_FLAG_ACCEPT, 1).
 -define(CHALLENGE_FLAG_REJECT, 2).
@@ -140,7 +141,19 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CONNECTED:4/integer, 2
     %% TODO relay the game packets via the server once both sides have failed to connect 2x
     {noreply, State};
 
+handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, _:4/integer>> }}, State = #state{peer_info=PeerInfo}) ->
 
+    Channels = maps:get(channels, PeerInfo),
+    Channel = maps:get(ChannelID, Channels),
+
+    Clients = openomf_lobby_sup:client_info(),
+    ConnectID = maps:get(connect_id, PeerInfo),
+    %% send all the currently online peers
+    [ enet:send_reliable(Channel, encode_peer_to_presence(Client, 0)) || Client <- Clients ],
+    %% tell the user their connect ID
+
+    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>),
+    {noreply, State};
 
 handle_info({enet, ChannelID, #reliable{ data = Packet }}, State) ->
     lager:info("got reliable packet ~p", [Packet]),
