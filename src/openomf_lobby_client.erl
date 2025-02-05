@@ -153,6 +153,8 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, _:4
     %% tell the user their connect ID
 
     enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>),
+
+    enet:send_reliable(Channel, encode_peer_to_presence(PeerInfo, 0)),
     {noreply, State};
 
 handle_info({enet, ChannelID, #reliable{ data = Packet }}, State) ->
