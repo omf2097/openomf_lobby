@@ -56,10 +56,10 @@ handle_info({'EXIT', PeerPid, _Reason}, State = #state{name=Name, peer_pid=PeerP
     enet:broadcast_reliable(2098, 1, <<?PACKET_DISCONNECT:4/integer, RFU:4/integer, ConnectID:32/integer-unsigned-big>>),
     {stop, normal, State};
 
-handle_info({enet, ChannelID, #unsequenced{ data = Packet }}, State) ->
+handle_info({enet, _ChannelID, #unsequenced{ data = Packet }}, State) ->
     lager:info("got unsequenced packet ~p", [Packet]),
     {noreply, State};
-handle_info({enet, ChannelID, #unreliable{ data = Packet }}, State) ->
+handle_info({enet, _ChannelID, #unreliable{ data = Packet }}, State) ->
     lager:info("got unreliable packet ~p", [Packet]),
     {noreply, State};
 
@@ -88,39 +88,59 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, 0:4/in
 		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, ?JOIN_FLAG_NAME_USED:4/integer, ConnectID:32/integer-unsigned-big>>),
 		    {noreply, State}
     end;
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_WHISPER:4/integer, 0:4/integer, ID:32/integer-unsigned-big, Msg/binary>> }}, State = #state{name=Name}) ->
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_WHISPER:4/integer, 0:4/integer, ID:32/integer-unsigned-big, Msg/binary>> }}, State = #state{name=Name}) ->
     lager:info("client ~p whispered ~s to ~p", [State#state.name, Msg, ID]),
     lager:info("gproc reports ~p", [gproc:lookup_pids({n, l, {connect_id, ID}})]),
     [Pid ! {whisper, <<?PACKET_WHISPER:4/integer, 0:4/integer, Name/binary, ": ", Msg/binary, 0>>} || Pid <- gproc:lookup_pids({n, l, {connect_id, ID}}) ],
     {noreply ,State};
 
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_YELL:4/integer, 0:4/integer, Yell/binary>> }}, State = #state{name=Name}) ->
-    %% TODO check if this is a whisper by looking if there's a username and a colon prefixed
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_YELL:4/integer, 0:4/integer, Yell/binary>> }}, State = #state{name=Name}) ->
+
+    %% check if this is a whisper by looking if there's a username and a colon prefixed
+    case binary:split(Yell, <<":">>) of
+        [MaybeUser, MaybeMessage] ->
+            Clients = openomf_lobby_sup:client_info(),
+            case [ maps:get(connect_id, Client)  || Client <- Clients, maps:get(name, Client) == MaybeUser ] of
+                [ConnectID] ->
+                    Message = case MaybeMessage of
+                                  <<" ", Rest/binary>> ->
+                                      Rest;
+                                  _ ->
+                                      MaybeMessage
+                              end,
+                    [Pid ! {whisper, <<?PACKET_WHISPER:4/integer, 0:4/integer, Name/binary, ": ", Message/binary, 0>>} || Pid <- gproc:lookup_pids({n, l, {connect_id, ConnectID}}) ],
+                    %% short circuit out
+                    throw({noreply, State});
+                _ ->
+                    ok
+            end;
+        _ ->
+            ok
+    end,
     lager:info("client ~p yelled ~s", [State#state.name, Yell]),
     enet:broadcast_reliable(2098, 1, <<?PACKET_YELL:4/integer, 0:4/integer, Name/binary, ": ", Yell/binary, 0>>),
     {noreply ,State};
 
-
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_ACCEPT:4/integer>> }}, State = #state{peer_info=PeerInfo, challenger=Challenger}) when Challenger /= undefined ->
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_ACCEPT:4/integer>> }}, State = #state{peer_info=PeerInfo, challenger=Challenger}) when Challenger /= undefined ->
     ConnectID = maps:get(connect_id, PeerInfo),
     [Pid ! {challenge_accept, ConnectID} || Pid <- gproc:lookup_pids({n, l, {connect_id, Challenger}}) ],
     {noreply, State};
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_REJECT:4/integer>> }}, State = #state{peer_info=PeerInfo, challenger=Challenger}) when Challenger /= undefined ->
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_REJECT:4/integer>> }}, State = #state{peer_info=PeerInfo, challenger=Challenger}) when Challenger /= undefined ->
     ConnectID = maps:get(connect_id, PeerInfo),
     [Pid ! {challenge_reject, ConnectID} || Pid <- gproc:lookup_pids({n, l, {connect_id, Challenger}}) ],
     {noreply, State#state{challenger=undefined}};
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_CANCEL:4/integer>> }}, State = #state{peer_info=PeerInfo, challengee=Challengee}) when Challengee /= undefined ->
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_CANCEL:4/integer>> }}, State = #state{peer_info=PeerInfo, challengee=Challengee}) when Challengee /= undefined ->
     %% user is cancelling their challenge
     ConnectID = maps:get(connect_id, PeerInfo),
     [Pid ! {challenge_cancel, ConnectID} || Pid <- gproc:lookup_pids({n, l, {connect_id, Challengee}}) ],
     {noreply, State#state{challengee=undefined}};
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_CANCEL:4/integer>> }}, State = #state{peer_info=PeerInfo, challenger=Challenger}) when Challenger /= undefined ->
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_CANCEL:4/integer>> }}, State = #state{peer_info=PeerInfo, challenger=Challenger}) when Challenger /= undefined ->
     %% user is cancelling their challenge
     ConnectID = maps:get(connect_id, PeerInfo),
     [Pid ! {challenge_cancel, ConnectID} || Pid <- gproc:lookup_pids({n, l, {connect_id, Challenger}}) ],
     {noreply, State#state{challenger=undefined}};
 
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, 0:4/integer, ID:32/integer-unsigned-big>> }}, State = #state{peer_info=PeerInfo, challengee=undefined, challenger=undefined}) ->
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, 0:4/integer, ID:32/integer-unsigned-big>> }}, State = #state{peer_info=PeerInfo, challengee=undefined, challenger=undefined}) ->
     ConnectID = maps:get(connect_id, PeerInfo),
     lager:info("~p is challenging ~p", [ConnectID, ID]),
     %% TODO monitor the pid, so if the other player disconnects we know
@@ -128,15 +148,15 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, 0
     {noreply ,State#state{challengee=ID}};
 
 
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CONNECTED:4/integer, 0:4/integer>> }}, State = #state{peer_info=PeerInfo}) ->
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CONNECTED:4/integer, 0:4/integer>> }}, State) ->
     lager:info("~p connected to peer", [State#state.name]),
     {noreply, State};
 
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CONNECTED:4/integer, 1:4/integer>> }}, State = #state{peer_info=PeerInfo}) ->
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CONNECTED:4/integer, 1:4/integer>> }}, State) ->
     lager:info("~p FAILED to connect to peer (first time)", [State#state.name]),
     {noreply, State};
 
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CONNECTED:4/integer, 2:4/integer>> }}, State = #state{peer_info=PeerInfo}) ->
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CONNECTED:4/integer, 2:4/integer>> }}, State) ->
     lager:info("~p FAILED to connect to peer (second time)", [State#state.name]),
     %% TODO relay the game packets via the server once both sides have failed to connect 2x
     {noreply, State};
@@ -158,7 +178,7 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, _:4
     % XXX clear the challengee/challenger state here for now
     {noreply, State#state{challenger=undefined, challengee=undefined}};
 
-handle_info({enet, ChannelID, #reliable{ data = Packet }}, State) ->
+handle_info({enet, _ChannelID, #reliable{ data = Packet }}, State) ->
     lager:info("got reliable packet ~p", [Packet]),
     {noreply, State};
 handle_info({whisper, Packet}, State = #state{peer_info=PeerInfo}) ->
