@@ -22,9 +22,19 @@
 -define(CHALLENGE_FLAG_ACCEPT, 1).
 -define(CHALLENGE_FLAG_REJECT, 2).
 -define(CHALLENGE_FLAG_CANCEL, 4).
+-define(CHALLENGE_FLAG_DONE, 8).
 
 -define(JOIN_FLAG_NAME_USED, 1).
 -define(JOIN_FLAG_NAME_INVALID, 2).
+
+-define(PRESENCE_UNKNOWN, 1).
+-define(PRESENCE_STARTING, 2).
+-define(PRESENCE_AVAILABLE, 3).
+-define(PRESENCE_PRACTICING, 4).
+-define(PRESENCE_CHALLENGING, 5).
+-define(PRESENCE_PONDERING, 6).
+-define(PRESENCE_FIGHTING, 7).
+-define(PRESENCE_WATCHING, 8).
 
 get_info(Pid) ->
     gen_server:call(Pid, get_info).
@@ -79,7 +89,7 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, 0:4/in
 		    %% confirm the join and tell the user their connect ID
 		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>),
 		    %% broadcast the user join...
-        PeerInfo2 = maps:put(external_port, ExtPort, maps:put(version, Version, maps:put(name, Name, State#state.peer_info))),
+        PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, maps:put(external_port, ExtPort, maps:put(version, Version, maps:put(name, Name, State#state.peer_info)))),
 		    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 1)),
 		    user_joined_event(Name),
 		    {noreply ,State#state{name = Name, version = Version, peer_info = PeerInfo2}}
@@ -124,28 +134,49 @@ handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_YELL:4/integer, 0:4/i
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_ACCEPT:4/integer>> }}, State = #state{peer_info=PeerInfo, challenger=Challenger}) when Challenger /= undefined ->
     ConnectID = maps:get(connect_id, PeerInfo),
     [Pid ! {challenge_accept, ConnectID} || Pid <- gproc:lookup_pids({n, l, {connect_id, Challenger}}) ],
-    {noreply, State};
+    PeerInfo2 = maps:put(status, ?PRESENCE_FIGHTING, PeerInfo),
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply, State#state{peer_info=PeerInfo2}};
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_REJECT:4/integer>> }}, State = #state{peer_info=PeerInfo, challenger=Challenger}) when Challenger /= undefined ->
     ConnectID = maps:get(connect_id, PeerInfo),
     [Pid ! {challenge_reject, ConnectID} || Pid <- gproc:lookup_pids({n, l, {connect_id, Challenger}}) ],
-    {noreply, State#state{challenger=undefined}};
+    PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, PeerInfo),
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply, State#state{challenger=undefined, peer_info=PeerInfo2}};
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_CANCEL:4/integer>> }}, State = #state{peer_info=PeerInfo, challengee=Challengee}) when Challengee /= undefined ->
     %% user is cancelling their challenge
     ConnectID = maps:get(connect_id, PeerInfo),
     [Pid ! {challenge_cancel, ConnectID} || Pid <- gproc:lookup_pids({n, l, {connect_id, Challengee}}) ],
-    {noreply, State#state{challengee=undefined}};
+    PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, PeerInfo),
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply, State#state{challengee=undefined, peer_info=PeerInfo2}};
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_DONE:4/integer, 0:8/integer>> }}, State = #state{peer_info=PeerInfo, challengee=Challengee, challenger=Challenger}) when Challengee /= undefined orelse Challenger /= undefined ->
+    NewPeerInfo = maps:put(status, ?PRESENCE_AVAILABLE, maps:put(wins, maps:get(wins, PeerInfo, 0) +1, PeerInfo)),
+    lager:info("~p won their match", [maps:get(name, PeerInfo)]),
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(NewPeerInfo, 0)),
+    {noreply, State#state{peer_info=NewPeerInfo}};
+handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_DONE:4/integer, 1:8/integer>> }}, State = #state{peer_info=PeerInfo, challengee=Challengee, challenger=Challenger}) when Challengee /= undefined orelse Challenger /= undefined ->
+    NewPeerInfo = maps:put(status, ?PRESENCE_AVAILABLE, maps:put(losses, maps:get(losses, PeerInfo, 0) +1, PeerInfo)),
+    lager:info("~p lost their match", [maps:get(name, PeerInfo)]),
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(NewPeerInfo, 0)),
+    {noreply, State#state{peer_info=NewPeerInfo}};
+
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_CANCEL:4/integer>> }}, State = #state{peer_info=PeerInfo, challenger=Challenger}) when Challenger /= undefined ->
     %% user is cancelling their challenge
     ConnectID = maps:get(connect_id, PeerInfo),
     [Pid ! {challenge_cancel, ConnectID} || Pid <- gproc:lookup_pids({n, l, {connect_id, Challenger}}) ],
-    {noreply, State#state{challenger=undefined}};
+    PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, PeerInfo),
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply, State#state{challenger=undefined, peer_info=PeerInfo2}};
 
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, 0:4/integer, ID:32/integer-unsigned-big>> }}, State = #state{peer_info=PeerInfo, challengee=undefined, challenger=undefined}) ->
     ConnectID = maps:get(connect_id, PeerInfo),
     lager:info("~p is challenging ~p", [ConnectID, ID]),
+    PeerInfo2 = maps:put(status, ?PRESENCE_CHALLENGING, PeerInfo),
     %% TODO monitor the pid, so if the other player disconnects we know
     [Pid ! {challenge, <<?PACKET_CHALLENGE:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>} || Pid <- gproc:lookup_pids({n, l, {connect_id, ID}}) ],
-    {noreply ,State#state{challengee=ID}};
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply ,State#state{challengee=ID, peer_info=PeerInfo2}};
 
 
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CONNECTED:4/integer, 0:4/integer>> }}, State) ->
@@ -192,29 +223,35 @@ handle_info({challenge, <<?PACKET_CHALLENGE:4/integer, 0:4/integer, Challenger:3
     Channels = maps:get(channels, PeerInfo),
     Channel = maps:get(0, Channels),
     enet:send_reliable(Channel, Packet),
-    {noreply, State#state{challenger=Challenger}};
+    PeerInfo2 = maps:put(status, ?PRESENCE_PONDERING, PeerInfo),
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply, State#state{challenger=Challenger, peer_info=PeerInfo2}};
 handle_info({challenge_cancel, Challenger}, State = #state{peer_info=PeerInfo, challenger=Challenger}) when Challenger /= undefined ->
     Channels = maps:get(channels, PeerInfo),
     Channel = maps:get(0, Channels),
     enet:send_reliable(Channel, <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_CANCEL:4/integer>>),
-    {noreply, State#state{challenger=undefined}};
+    PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, PeerInfo),
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply, State#state{challenger=undefined, peer_info=PeerInfo2}};
 handle_info({challenge_cancel, Challengee}, State = #state{peer_info=PeerInfo, challengee=Challengee}) when Challengee /= undefined ->
     Channels = maps:get(channels, PeerInfo),
     Channel = maps:get(0, Channels),
     enet:send_reliable(Channel, <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_CANCEL:4/integer>>),
     {noreply, State#state{challengee=undefined}};
-
 handle_info({challenge_reject, Challengee}, State = #state{peer_info=PeerInfo, challengee=Challengee}) ->
     Channels = maps:get(channels, PeerInfo),
     Channel = maps:get(0, Channels),
     enet:send_reliable(Channel, <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_REJECT:4/integer>>),
-    {noreply, State#state{challengee=undefined}};
-
+    PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, PeerInfo),
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply, State#state{challengee=undefined, peer_info=PeerInfo2}};
 handle_info({challenge_accept, Challengee}, State = #state{peer_info=PeerInfo, challengee=Challengee}) ->
     Channels = maps:get(channels, PeerInfo),
     Channel = maps:get(0, Channels),
     enet:send_reliable(Channel, <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_FLAG_ACCEPT:4/integer>>),
-    {noreply, State};
+    PeerInfo2 = maps:put(status, ?PRESENCE_FIGHTING, PeerInfo),
+    enet:broadcast_reliable(2098, 1, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply, State#state{peer_info=PeerInfo2}};
 
 
 handle_info(Msg, State) ->
@@ -229,10 +266,11 @@ encode_peer_to_presence(PeerInfo, NewlyJoined) ->
     ExtPort = maps:get(external_port, PeerInfo, 0),
     Wins = maps:get(wins, PeerInfo, 0),
     Losses = maps:get(losses, PeerInfo, 0),
+    Status = maps:get(status, PeerInfo, ?PRESENCE_UNKNOWN),
     Version = maps:get(version, PeerInfo),
     Name = maps:get(name, PeerInfo),
     VersionLen = byte_size(Version),
-    <<?PACKET_PRESENCE:4/integer, NewlyJoined:1/integer, RFU:3/integer, ConnectID:32/integer-unsigned-big, D:8/integer, C:8/integer, B:8/integer, A:8/integer, Port:16/integer, ExtPort:16/integer, Wins:8/integer, Losses:8/integer, VersionLen:8/integer, Version/binary, Name/binary>>.
+    <<?PACKET_PRESENCE:4/integer, NewlyJoined:1/integer, RFU:3/integer, ConnectID:32/integer-unsigned-big, D:8/integer, C:8/integer, B:8/integer, A:8/integer, Port:16/integer, ExtPort:16/integer, Wins:8/integer, Losses:8/integer, Status:8/integer, VersionLen:8/integer, Version/binary, Name/binary>>.
 
 
 user_joined_event(Name) ->
