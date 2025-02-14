@@ -3,7 +3,7 @@
 -behaviour(supervisor).
 
 -export([start_link/1,
-         start_client/1, client_info/0]).
+         start_client/1, client_presence/0]).
 
 -export([init/1]).
 
@@ -24,6 +24,6 @@ init(_Args) ->
 start_client(PeerInfo) ->
     supervisor:start_child(?MODULE, [PeerInfo]).
 
-client_info() ->
+client_presence() ->
     Children = supervisor:which_children(?MODULE),
-    [Info || {ok, Info} <-[ openomf_lobby_client:get_info(Pid) || {_Id, Pid, _Type, _Modules} <- Children, Pid /= self()]].
+    [ openomf_lobby_client:get_presence(Pid, self()) || {_Id, Pid, _Type, _Modules} <- Children, Pid /= self()].

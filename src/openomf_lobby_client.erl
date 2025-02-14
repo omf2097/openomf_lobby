@@ -4,11 +4,17 @@
 
 -behaviour(gen_server).
 
--record(state, {peer_info :: map(), peer_pid :: pid(), name :: undefined | binary(), version :: undefined | binary(), challenger :: undefined | pos_integer(), challengee :: undefined | pos_integer()}).
+-record(state, {peer_info :: map(),
+                peer_pid :: pid(),
+                protocol_version :: non_neg_integer(),
+                name :: undefined | binary(),
+                version :: undefined | binary(),
+                challenger :: undefined | pos_integer(),
+                challengee :: undefined | pos_integer()}).
 
 -export([start_link/1, init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
--export([get_info/1]).
+-export([get_presence/2]).
 
 -define(PACKET_JOIN, 1).
 -define(PACKET_YELL, 2).
@@ -24,8 +30,9 @@
 -define(CHALLENGE_FLAG_CANCEL, 4).
 -define(CHALLENGE_FLAG_DONE, 8).
 
--define(JOIN_FLAG_NAME_USED, 1).
--define(JOIN_FLAG_NAME_INVALID, 2).
+-define(JOIN_ERROR_NAME_USED, 1).
+-define(JOIN_ERROR_NAME_INVALID, 2).
+-define(JOIN_ERROR_UNSUPPORTED_PROTOCOL, 3).
 
 -define(PRESENCE_UNKNOWN, 1).
 -define(PRESENCE_STARTING, 2).
@@ -36,8 +43,8 @@
 -define(PRESENCE_FIGHTING, 7).
 -define(PRESENCE_WATCHING, 8).
 
-get_info(Pid) ->
-    gen_server:call(Pid, get_info).
+get_presence(Pid, Dest) ->
+    gen_server:cast(Pid, {get_presence, Dest}).
 
 start_link(PeerInfo) ->
     gen_server:start_link(?MODULE, PeerInfo, []).
@@ -50,11 +57,18 @@ init(PeerInfo) ->
     lager:info("new client ~p", [PeerInfo]),
     {ok, #state{peer_info=PeerInfo, peer_pid=PeerPid}}.
 
-handle_call(get_info, _From, State = #state{name=Name, version=Version}) when is_binary(Name) ->
-    {reply, {ok, maps:put(version, Version, maps:put(name, Name, State#state.peer_info))}, State};
 handle_call(_, _, State) ->
     {reply, error, State}.
 
+handle_cast({get_presence, From}, State = #state{name=Name, version=Version}) when is_binary(Name) ->
+    Info = maps:put(version, Version, maps:put(name, Name, State#state.peer_info)),
+    gen_server:cast(From, {presence, encode_peer_to_presence(Info, 0)}),
+    {noreply, State};
+handle_cast({presence, Msg}, State = #state{peer_info = PeerInfo}) ->
+    Channels = maps:get(channels, PeerInfo),
+    Channel = maps:get(1, Channels),
+    enet:send_reliable(Channel, Msg),
+    {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -73,19 +87,17 @@ handle_info({enet, _ChannelID, #unreliable{ data = Packet }}, State) ->
     lager:info("got unreliable packet ~p", [Packet]),
     {noreply, State};
 
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, 0:4/integer, ExtPort:16/integer-unsigned-big, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State = #state{name=undefined}) ->
+handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyVersion:4/integer, ExtPort:16/integer-unsigned-big, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State = #state{name=undefined}) when LobbyVersion == 0 ->
     lager:info("client has named themselves ~s and has an external port of ~p", [Name, ExtPort]),
     %% TODO check for a name conflict!
     %% and that the name is not too long, etc
-    Clients = openomf_lobby_sup:client_info(),
+    Clients = openomf_lobby_sup:client_presence(),
     PeerInfo = State#state.peer_info,
     Channels = maps:get(channels, PeerInfo),
     Channel = maps:get(ChannelID, Channels),
     ConnectID = maps:get(connect_id, PeerInfo),
     try gproc:reg({n, l, {username, Name}}, self()) of
 	    true ->
-		    %% send all the currently online peers
-		    [ enet:send_reliable(Channel, encode_peer_to_presence(Client, 0)) || Client <- Clients ],
 		    %% confirm the join and tell the user their connect ID
 		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>),
 		    %% broadcast the user join...
@@ -95,9 +107,17 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, 0:4/in
 		    {noreply ,State#state{name = Name, version = Version, peer_info = PeerInfo2}}
 	    catch _:_ ->
 		    %% user already registered
-		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, ?JOIN_FLAG_NAME_USED:4/integer, ConnectID:32/integer-unsigned-big>>),
-		    {noreply, State}
+		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, ?JOIN_ERROR_NAME_USED:4/integer, ConnectID:32/integer-unsigned-big>>),
+		    {stop, normal, State}
     end;
+handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, Version:4/integer, _/binary>> }}, State = #state{name=undefined}) ->
+    lager:info("client tried to connect with unsupported protocol version ~p", [Version]),
+    PeerInfo = State#state.peer_info,
+    Channels = maps:get(channels, PeerInfo),
+    Channel = maps:get(ChannelID, Channels),
+    ConnectID = maps:get(connect_id, PeerInfo),
+    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, ?JOIN_ERROR_UNSUPPORTED_PROTOCOL:4/integer, ConnectID:32/integer-unsigned-big>>),
+    {stop, normal, State};
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_WHISPER:4/integer, 0:4/integer, ID:32/integer-unsigned-big, Msg/binary>> }}, State = #state{name=Name}) ->
     lager:info("client ~p whispered ~s to ~p", [State#state.name, Msg, ID]),
     lager:info("gproc reports ~p", [gproc:lookup_pids({n, l, {connect_id, ID}})]),
@@ -109,16 +129,15 @@ handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_YELL:4/integer, 0:4/i
     %% check if this is a whisper by looking if there's a username and a colon prefixed
     case binary:split(Yell, <<":">>) of
         [MaybeUser, MaybeMessage] ->
-            Clients = openomf_lobby_sup:client_info(),
-            case [ maps:get(connect_id, Client)  || Client <- Clients, maps:get(name, Client) == MaybeUser ] of
-                [ConnectID] ->
+            case gproc:lookup_pids({n, l, {username, MaybeUser}}, self()) of
+                [Pid] ->
                     Message = case MaybeMessage of
                                   <<" ", Rest/binary>> ->
                                       Rest;
                                   _ ->
                                       MaybeMessage
                               end,
-                    [Pid ! {whisper, <<?PACKET_WHISPER:4/integer, 0:4/integer, Name/binary, ": ", Message/binary, 0>>} || Pid <- gproc:lookup_pids({n, l, {connect_id, ConnectID}}) ],
+                    Pid ! {whisper, <<?PACKET_WHISPER:4/integer, 0:4/integer, Name/binary, ": ", Message/binary, 0>>},
                     %% short circuit out
                     throw({noreply, State});
                 _ ->
@@ -197,12 +216,9 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, _:4
     Channels = maps:get(channels, PeerInfo),
     Channel = maps:get(ChannelID, Channels),
 
-    Clients = openomf_lobby_sup:client_info(),
+    Clients = openomf_lobby_sup:client_presence(),
     ConnectID = maps:get(connect_id, PeerInfo),
-    %% send all the currently online peers
-    [ enet:send_reliable(Channel, encode_peer_to_presence(Client, 0)) || Client <- Clients ],
     %% tell the user their connect ID
-
     enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>),
 
     enet:send_reliable(Channel, encode_peer_to_presence(PeerInfo, 0)),
