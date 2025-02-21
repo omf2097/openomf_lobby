@@ -7,7 +7,7 @@
 start(_StartType, _StartArgs) ->
     ListeningPort = 2098,
     ConnectFun = fun(PeerInfo) ->
-                         openomf_lobby_sup:start_client(PeerInfo)
+                         openomf_lobby_client_sup:start_client(PeerInfo)
                  end,
     Options = [{peer_limit, 10}, {channel_limit, 3}],
     {ok, Host} = enet:start_host(ListeningPort, ConnectFun, Options),
