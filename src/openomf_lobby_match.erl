@@ -54,7 +54,9 @@ starting(cast, {incompatible, ChallengeePid}, #state{challengee_pid = Challengee
     {stop, challengee_incompatible};
 starting(cast, cancel, _Data) ->
     %% challenger is cancelling
-    {stop, cancel}.
+    {stop, cancel};
+starting(Type, Event, Data) ->
+    handle_event(?FUNCTION_NAME, Type, Event, Data).
 
 challenging(enter, _OldState, _Data) ->
     keep_state_and_data;
@@ -67,7 +69,10 @@ challenging(cast, reject, _Data) ->
 challenging(cast, accept, Data) ->
     gen_server:cast(Data#state.challenger_pid, accepted),
     %% challengee is accepting
-    {next_state, connecting, Data}.
+    {next_state, connecting, Data};
+challenging(Type, Event, Data) ->
+    handle_event(?FUNCTION_NAME, Type, Event, Data).
+
 
 connecting(enter, _OldState, _Data) ->
     keep_state_and_data;
@@ -79,25 +84,15 @@ connecting(cast, {connected, ChallengeePid}, Data = #state{challengee_pid = Chal
     check_connected(NewData);
 connecting(cast, {connect_failed, ChallengerPid, Count}, Data = #state{challenger_pid = ChallengerPid, challenger_connect_count = ChallengerConnectCount}) ->
     NewData = Data#state{challenger_connect_count = Count + ChallengerConnectCount},
-    case Count + ChallengerConnectCount == 5 andalso Data#state.challengee_connect_count == 5 of
-        true ->
-            lager:info("Match should be relayed"),
-            {stop, relay_not_implemented};
-        false ->
-            {keep_state, NewData}
-    end;
+    maybe_relay(NewData);
 connecting(cast, {connect_failed, ChallengeePid, Count}, Data = #state{challengee_pid = ChallengeePid, challengee_connect_count = ChallengeeConnectCount}) ->
     NewData = Data#state{challengee_connect_count = Count + ChallengeeConnectCount},
-    case Count + ChallengeeConnectCount == 5 andalso Data#state.challenger_connect_count == 5 of
-        true ->
-            lager:info("Match should be relayed"),
-            {stop, relay_not_implemented};
-        false ->
-            {keep_state, NewData}
-    end;
+    maybe_relay(NewData);
 connecting(cast, cancel, _Data) ->
     %% either side is cancelling
-    {stop, cancel}.
+    {stop, cancel};
+connecting(Type, Event, Data) ->
+    handle_event(?FUNCTION_NAME, Type, Event, Data).
 
 
 
@@ -115,13 +110,31 @@ connected(cast, {done, ChallengerPid, WonOrLost}, Data = #state{challenger_pid =
     check_winner(NewData);
 connected(cast, {done, ChallengeePid, WonOrLost}, Data = #state{challengee_pid = ChallengeePid, challengee_won=undefined}) ->
     NewData = Data#state{challengee_won = WonOrLost == 0},
-    check_winner(NewData).
+    check_winner(NewData);
+connected(Type, Event, Data) ->
+    handle_event(?FUNCTION_NAME, Type, Event, Data).
 
+handle_event(connected, cast, {enet, _Pid, 2, _Event}, _Data) ->
+    keep_state_and_data;
+handle_event(State, Type, Event, _Data) ->
+    lager:info("got unhandled event ~p ~p in state ~p", [Type, Event, State]),
+    keep_state_and_data.
 
 check_connected(NewData = #state{challenger_connected = true, challengee_connected = true}) ->
     {next_state, connected, NewData};
 check_connected(NewData) ->
     {keep_state, NewData}.
+
+maybe_relay(NewData) ->
+    case NewData#state.challenger_connect_count == 4 andalso NewData#state.challenger_connect_count == 4 of
+        true ->
+            lager:info("Establishing relay between ~p and ~p", [maps:get(name, NewData#state.challenger_info), maps:get(name, NewData#state.challengee_info)]),
+            gen_server:cast(NewData#state.challenger_pid, {relay, maps:get(channels, NewData#state.challengee_info)}),
+            gen_server:cast(NewData#state.challengee_pid, {relay, maps:get(channels, NewData#state.challenger_info)}),
+            {keep_state, NewData};
+        false ->
+            {keep_state, NewData}
+    end.
 
 check_winner(NewData) ->
     case {NewData#state.challenger_won, NewData#state.challengee_won} of
