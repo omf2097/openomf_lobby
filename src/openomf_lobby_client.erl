@@ -9,7 +9,8 @@
                 match_pid :: undefined | pid(),
                 protocol_version :: non_neg_integer(),
                 name :: undefined | binary(),
-                version :: undefined | binary()
+                version :: undefined | binary(),
+                relays=#{} :: map()
                }).
 
 -export([start_link/1, init/1, handle_call/3, handle_cast/2, handle_info/2]).
@@ -25,6 +26,7 @@
 -define(PACKET_CONNECTED, 7).
 -define(PACKET_REFRESH, 8).
 -define(PACKET_ANNOUNCEMENT, 9).
+-define(PACKET_RELAY, 10).
 
 -define(CHALLENGE_OFFER, 1).
 -define(CHALLENGE_ACCEPT, 1).
@@ -151,6 +153,13 @@ handle_cast({announce, Message}, State = #state{peer_info=PeerInfo}) ->
 
     {noreply, State};
 
+handle_cast({relay, Relays}, State = #state{peer_info = PeerInfo}) when is_map(Relays) ->
+    Channels = maps:get(channels, PeerInfo),
+    Channel = maps:get(0, Channels),
+    %% signal to the client it needs to relay
+    enet:send_reliable(Channel, <<?PACKET_RELAY:4/integer, 0:4/integer>>),
+    {noreply, State#state{relays=Relays}};
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -195,7 +204,33 @@ handle_info({'EXIT', MatchPid, Reason}, State = #state{match_pid = MatchPid, pee
 
     NewPeerInfo = maps:put(status, ?PRESENCE_AVAILABLE, PeerInfo),
     enet:broadcast_reliable(2098, 0, encode_peer_to_presence(NewPeerInfo, 0)),
-    {noreply, State#state{peer_info=NewPeerInfo, match_pid=undefined}};
+    {noreply, State#state{peer_info=NewPeerInfo, match_pid=undefined, relays=#{}}};
+
+handle_info({enet, ChannelID, Event}, State = #state{match_pid = MatchPid}) when is_pid(MatchPid) andalso ChannelID > 0 ->
+    %% packets other than channel 0 are for fights
+    %% check if we're relaying, so we can send direct
+    Channel = maps:get(ChannelID, State#state.relays, undefined),
+    case Channel of
+        undefined ->
+            ok;
+        RelayChannel when is_record(Event, reliable) ->
+            enet:send_reliable(RelayChannel, Event#reliable.data);
+        RelayChannel when is_record(Event, unsequenced) ->
+            enet:send_unsequenced(RelayChannel, Event#unsequenced.data);
+        RelayChannel when is_record(Event, unreliable) ->
+            enet:send_unreliable(RelayChannel, Event#unreliable.data)
+    end,
+
+    case ChannelID == 2 of
+        true ->
+            %% channel 2 packets are the event packets, so we want them in the match pid
+            %% we will always get these
+            gen_statem:cast(MatchPid, {enet, self(), 2, Event});
+        _ ->
+            ok
+    end,
+    {noreply, State};
+
 
 handle_info({enet, _ChannelID, #unsequenced{ data = Packet }}, State) ->
     lager:info("got unsequenced packet ~p", [Packet]),
@@ -281,18 +316,18 @@ handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, 
     gen_statem:cast(MatchPid, reject),
     PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, State#state.peer_info),
     enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
-    {noreply, State#state{match_pid=undefined, peer_info=PeerInfo2}};
+    {noreply, State#state{match_pid=undefined, peer_info=PeerInfo2, relays=#{}}};
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_CANCEL:4/integer>> }}, State = #state{match_pid=MatchPid}) when MatchPid /= undefined ->
     %% user is cancelling their challenge
     unlink(MatchPid),
     gen_statem:cast(MatchPid, cancel),
     PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, State#state.peer_info),
     enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
-    {noreply, State#state{match_pid=undefined, peer_info=PeerInfo2}};
+    {noreply, State#state{match_pid=undefined, peer_info=PeerInfo2, relays=#{}}};
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_DONE:4/integer, Result:8/integer>> }}, State = #state{match_pid=MatchPid}) when MatchPid /= undefined ->
     gen_statem:cast(MatchPid, {done, self(), Result}),
    {noreply, State};
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, 0:4/integer, ID:32/integer-unsigned-big>> }}, State = #state{peer_info=PeerInfo, match_pid=undefined, version=Version}) ->
+handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, 0:4/integer, ID:32/integer-unsigned-big>> }}, State = #state{peer_info=PeerInfo, match_pid=undefined}) ->
     %% initiating a challenge
     ConnectID = maps:get(connect_id, PeerInfo),
     lager:info("~p is challenging ~p", [ConnectID, ID]),
