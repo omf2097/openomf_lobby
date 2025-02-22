@@ -21,6 +21,18 @@
           challengee_won = undefined :: undefined | boolean()
          }).
 
+-define(QUIPS, ["~s sent ~s straight to the scrap heap... with a warranty void receipt!",
+                "~s rewired ~s's circuits into a Roomba. Sweep up your dignity!",
+                "~s factory-reset ~s back to 'My First HAR Kit.' Assembly required... again.",
+                "~s served ~s a 404 Error: Victory Not Found. Try rebooting... in another match.",
+                "~s turned ~s's armor into abstract art... with their fist. Call it Post-Modern Defeat.",
+                "~s's hydraulics wrote ~s's epitaph: 'Here lies potential. Unplugged.'",
+                "~s hammered ~s into a hood ornament. Shiny, useless, perfect.",
+                "~s forged ~s into a paperweight. Artisanal defeat!",
+                "~s melted ~s down for spare change. Profit margin: pathetic."]).
+
+-define(PACKET_ANNOUNCEMENT, 9).
+
 start_link(ChallengerPid, ChallengerInfo, ChallengeePid) ->
     gen_statem:start_link(?MODULE, [ChallengerPid, ChallengerInfo, ChallengeePid], []).
 
@@ -144,10 +156,12 @@ check_winner(NewData) ->
         {true, false} ->
             gen_server:cast(NewData#state.challenger_pid, won),
             gen_server:cast(NewData#state.challengee_pid, lost),
+            quip(maps:get(name, NewData#state.challenger_info), maps:get(name, NewData#state.challengee_info)),
             {stop, normal};
         {false, true} ->
             gen_server:cast(NewData#state.challenger_pid, lost),
             gen_server:cast(NewData#state.challengee_pid, won),
+            quip(maps:get(name, NewData#state.challengee_info), maps:get(name, NewData#state.challenger_info)),
             {stop, normal};
         {false, false} ->
             %% disconnect?
@@ -157,6 +171,16 @@ check_winner(NewData) ->
     end.
 
 
+quip(Winner, Loser) ->
+    E = rand:uniform(length(?QUIPS)),
+    Quip = lists:nth(E, ?QUIPS),
+    Bin = iolist_to_binary(io_lib:format(Quip, [Winner, Loser])),
+    enet:broadcast_reliable(2098, 0, <<?PACKET_ANNOUNCEMENT:4/integer, 0:4/integer, Bin/binary, 0>>),
+    case application:get_env(discord_callback) of
+        undefined -> ok;
+        {ok, URL} ->
+            hackney:request(post, URL, [{<<"Content-Type">>, <<"application/json">>}], <<"{\"content\": \"", Bin/binary, "\" }">>, [])
+    end.
 
 
 
