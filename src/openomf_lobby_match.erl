@@ -118,10 +118,10 @@ connected(cast, cancel, _Data) ->
     %% either side is cancelling
     {stop, cancel};
 connected(cast, {done, ChallengerPid, WonOrLost}, Data = #state{challenger_pid = ChallengerPid, challenger_won=undefined}) ->
-    NewData = Data#state{challenger_won = WonOrLost == 0},
+    NewData = Data#state{challenger_won = WonOrLost == 1},
     check_winner(NewData);
 connected(cast, {done, ChallengeePid, WonOrLost}, Data = #state{challengee_pid = ChallengeePid, challengee_won=undefined}) ->
-    NewData = Data#state{challengee_won = WonOrLost == 0},
+    NewData = Data#state{challengee_won = WonOrLost == 1},
     check_winner(NewData);
 connected(Type, Event, Data) ->
     handle_event(?FUNCTION_NAME, Type, Event, Data).
