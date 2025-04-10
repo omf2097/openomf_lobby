@@ -69,7 +69,7 @@ callback_mode() ->
 
 starting(enter, _OldState, Data) ->
     %% challenge the challengee
-    lager:info("sending challenge to ~p", Data#state.challengee_pid),
+    lager:info("sending challenge to ~p", [Data#state.challengee_pid]),
     ChallengerID = maps:get(connect_id, Data#state.challenger_info),
     Version = maps:get(version, Data#state.challenger_info),
     openomf_lobby_client:challenge(Data#state.challengee_pid, self(), ChallengerID, Version),
@@ -187,8 +187,18 @@ handle_event(_State, cast, {done, Pid}, Data = #state{challenger_pid = Pid}) ->
     NewData = Data#state{challenger_won = false},
     check_winner(NewData);
 handle_event(_State, cast, {done, Pid}, Data = #state{challengee_pid = Pid}) ->
+    lager:info("~p reports match is finished abnormally", [Pid]),
     NewData = Data#state{challenger_won = false},
-    check_winner(NewData);
+    case check_winner(NewData) of
+        {keep_state, NewerData} ->
+            %% set a timeout to end this match if the other side doesn't report in
+            {keep_state, NewerData, [{state_timeout, 10000, finish_match}]};
+        Other ->
+            Other
+    end;
+
+handle_event(_State, state_timeout, finish_match, _Data) ->
+    {stop, normal};
 handle_event(State, Type, Event, _Data) ->
     lager:info("got unhandled event ~p ~p in state ~p", [Type, Event, State]),
     keep_state_and_data.
