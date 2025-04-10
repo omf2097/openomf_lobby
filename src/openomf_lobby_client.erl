@@ -262,7 +262,7 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyV
                 lager:info("motd is ~p", [Message]),
                 enet:send_reliable(Channel, <<?PACKET_ANNOUNCEMENT:4/integer, 0:4/integer, Message/binary, 0>>)
         end,
-		    {noreply ,State#state{name = Name, version = Version, peer_info = PeerInfo2}}
+		    {noreply ,State#state{name = Name, version = Version, protocol_version = LobbyVersion, peer_info = PeerInfo2}}
 	    catch _:_ ->
 		    %% user already registered
 		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, ?JOIN_ERROR_NAME_USED:4/integer, ConnectID:32/integer-unsigned-big>>),
@@ -377,6 +377,13 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, _:4
     ConnectID = maps:get(connect_id, PeerInfo),
     %% tell the user their connect ID
     enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>),
+
+    case is_pid(State#state.match_pid) andalso is_process_alive(State#state.match_pid) of
+        true ->
+            gen_statem:cast(State#state.match_pid, {done, self()});
+        false ->
+            ok
+    end,
 
     enet:send_reliable(Channel, encode_peer_to_presence(PeerInfo, 0)),
     {noreply, State};

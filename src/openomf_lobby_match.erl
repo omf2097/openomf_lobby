@@ -1,24 +1,41 @@
 -module(openomf_lobby_match).
 
+-include_lib("enet/include/enet.hrl").
+
 -behaviour(gen_statem).
 
 -export([start_link/3]).
 
--export([init/1,callback_mode/0]).%%,terminate/3]).
+-export([init/1,callback_mode/0, terminate/3]).
 
 -export([starting/3, challenging/3, connecting/3, connected/3]).
+
+-record(pilot, {
+          har_id :: non_neg_integer(),
+          power :: non_neg_integer(),
+          agility :: non_neg_integer(),
+          endurance :: non_neg_integer(),
+          primary_color :: non_neg_integer(),
+          secondary_color :: non_neg_integer(),
+          tertiary_color :: non_neg_integer(),
+          name :: binary()
+          }).
 
 -record(state, {
           challenger_pid :: pid(),
           challenger_info :: map(),
+          challenger_pilot :: undefined | #pilot{},
           challengee_pid :: pid(),
           challengee_info :: undefined | map(),
+          challengee_pilot :: undefined | #pilot{},
           challenger_connected = false :: boolean(),
           challengee_connected = false :: boolean(),
           challenger_connect_count = 0 :: non_neg_integer(),
           challengee_connect_count = 0 :: non_neg_integer(),
           challenger_won = undefined :: undefined | boolean(),
-          challengee_won = undefined :: undefined | boolean()
+          challengee_won = undefined :: undefined | boolean(),
+          events = maps:new() :: map(),
+          arena_id :: non_neg_integer()
          }).
 
 -define(QUIPS, ["~s sent ~s straight to the scrap heap... with a warranty void receipt!",
@@ -32,6 +49,9 @@
                 "~s melted ~s down for spare change. Profit margin: pathetic."]).
 
 -define(PACKET_ANNOUNCEMENT, 9).
+
+-define(EVENT_TYPE_ACTION, 0).
+-define(EVENT_TYPE_GAME_INFO, 4).
 
 start_link(ChallengerPid, ChallengerInfo, ChallengeePid) ->
     gen_statem:start_link(?MODULE, [ChallengerPid, ChallengerInfo, ChallengeePid], []).
@@ -126,11 +146,64 @@ connected(cast, {done, ChallengeePid, WonOrLost}, Data = #state{challengee_pid =
 connected(Type, Event, Data) ->
     handle_event(?FUNCTION_NAME, Type, Event, Data).
 
+handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAME_INFO:8/integer, ArenaID:8/integer-unsigned, HARId:8/integer-unsigned,
+                                                         Power:8/integer-unsigned, Agility:8/integer-unsigned, Endurance:8/integer-unsigned,
+                                                         PrimaryColor:8/integer-unsigned, SecondaryColor:8/integer-unsigned, TertiaryColor:8/integer-unsigned,
+                                                         NameLen:8/integer-unsigned, Name:NameLen/binary>>}}, Data) ->
+    Pilot = #pilot{har_id = HARId, power = Power, endurance = Endurance, agility = Agility, primary_color = PrimaryColor, secondary_color = SecondaryColor, tertiary_color = TertiaryColor, name = Name},
+    NewData = case Pid of
+                  _ when Pid == Data#state.challenger_pid ->
+                      Data#state{challenger_pilot = Pilot, arena_id =ArenaID};
+                  _ when Pid == Data#state.challengee_pid ->
+                      Data#state{challengee_pilot = Pilot, arena_id = ArenaID};
+                  _ ->
+                      Data
+              end,
+    {keep_state, NewData};
+handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_ACTION:8/integer, LastReceivedTick:32/integer-unsigned-big, LastHashTick:32/integer-unsigned-big, LastHash:32/integer-unsigned-big, LastTick:32/integer-unsigned-big, FrameAdvantage:8/integer-signed, Rest/binary>>}}, Data) ->
+    {HashKey, LastRecKey, FAKey, EventKey} =case Pid of
+                              _ when Pid == Data#state.challenger_pid ->
+                                  {challenger_hash, challenger_last_received_tick, challenger_frame_advantage, challenger_events};
+                              _ when Pid == Data#state.challengee_pid ->
+                                  {challengee_hash, challengee_last_received_tick, challengee_frame_advantage, challengee_events}
+                          end,
+    Event0 = maps:get(LastHashTick, Data#state.events, maps:new()),
+    OldHash = maps:get(HashKey, Event0, undefined),
+    case OldHash /= undefined andalso OldHash /= LastHash of
+        true ->
+            lager:warning("~p changed from ~p to ~p for tick ~p", [HashKey, OldHash, LastHash, LastHashTick]);
+        false ->
+            ok
+    end,
+    Event1 = maps:put(FAKey, FrameAdvantage, maps:put(LastRecKey, LastReceivedTick, maps:get(LastTick, Data#state.events, maps:new()))),
+
+    Events = maps:put(LastTick, Event1, maps:put(LastHashTick, maps:put(HashKey, LastHash, Event0), Data#state.events)),
+    NewEvents = insert_events(Events, EventKey, Rest),
+    {keep_state, Data#state{events=NewEvents}};
 handle_event(connected, cast, {enet, _Pid, 2, _Event}, _Data) ->
+    lager:info("unhandled enet event ~p", [_Event]),
     keep_state_and_data;
+handle_event(_State, cast, {done, Pid}, Data = #state{challenger_pid = Pid}) ->
+    NewData = Data#state{challenger_won = false},
+    check_winner(NewData);
+handle_event(_State, cast, {done, Pid}, Data = #state{challengee_pid = Pid}) ->
+    NewData = Data#state{challenger_won = false},
+    check_winner(NewData);
 handle_event(State, Type, Event, _Data) ->
     lager:info("got unhandled event ~p ~p in state ~p", [Type, Event, State]),
     keep_state_and_data.
+
+terminate(_Reason, _State, Data) when Data#state.challengee_info /= undefined ->
+    L = lists:keysort(1, maps:to_list(Data#state.events)),
+
+    Text = unicode:characters_to_binary(io_lib:format("~tp.~n", [{{arena_id, Data#state.arena_id}, Data#state.challenger_pilot, Data#state.challengee_pilot, L}])),
+    Filename = lists:flatten(io_lib:format("/tmp/matches/~s-~s-~s.match", [maps:get(name, Data#state.challenger_info, undefined), maps:get(name, Data#state.challengee_info, undefined), iso8601:format(calendar:universal_time())])),
+    filelib:ensure_dir(Filename),
+    file:write_file(Filename, Text),
+    ok;
+terminate(_Reason, _State, _Data) ->
+    ok.
+
 
 check_connected(NewData = #state{challenger_connected = true, challengee_connected = true}) ->
     {next_state, connected, NewData};
@@ -182,6 +255,24 @@ quip(Winner, Loser) ->
             hackney:request(post, URL, [{<<"Content-Type">>, <<"application/json">>}], <<"{\"content\": \"", Bin/binary, "\" }">>, [])
     end.
 
+insert_events(Events, _, <<>>) ->
+    Events;
+insert_events(Events, Key, <<Tick:32/integer-unsigned-big, Rest/binary>>) ->
+    Event = maps:get(Tick, Events, #{}),
+    {Inputs, NextBin} = get_inputs(Rest),
+    NewEvents = case Inputs of
+                    [] ->
+                        Events;
+                    _ ->
+                        maps:put(Tick, maps:put(Key, Inputs, Event), Events)
+                end,
+    insert_events(NewEvents, Key, NextBin).
 
 
+get_inputs(Bin) ->
+    get_inputs(Bin, []).
 
+get_inputs(<<0:8/integer-unsigned, Rest/binary>>, Acc) ->
+    {lists:reverse(Acc), Rest};
+get_inputs(<<A:8/integer-unsigned, Rest/binary>>, Acc) ->
+    get_inputs(Rest, [A|Acc]).

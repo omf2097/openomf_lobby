@@ -10,7 +10,8 @@
                   stdlib,
                   enet,
                   lager,
-	          hackney
+	          hackney,
+            iso8601
                  ]},
   {env, []},
   {modules, []},
