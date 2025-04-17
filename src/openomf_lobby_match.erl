@@ -138,9 +138,11 @@ connected(cast, cancel, _Data) ->
     %% either side is cancelling
     {stop, cancel};
 connected(cast, {done, ChallengerPid, WonOrLost}, Data = #state{challenger_pid = ChallengerPid, challenger_won=undefined}) ->
+    lager:info("challenger won: ~p", [WonOrLost == 1]),
     NewData = Data#state{challenger_won = WonOrLost == 1},
     check_winner(NewData);
 connected(cast, {done, ChallengeePid, WonOrLost}, Data = #state{challengee_pid = ChallengeePid, challengee_won=undefined}) ->
+    lager:info("challengee won: ~p", [WonOrLost == 1]),
     NewData = Data#state{challengee_won = WonOrLost == 1},
     check_winner(NewData);
 connected(Type, Event, Data) ->
@@ -202,10 +204,11 @@ handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_
 handle_event(connected, cast, {enet, _Pid, 2, _Event}, _Data) ->
     lager:info("unhandled enet event ~p", [_Event]),
     keep_state_and_data;
-handle_event(_State, cast, {done, Pid}, Data = #state{challenger_pid = Pid}) ->
+handle_event(_State, cast, {done, Pid}, Data = #state{challenger_pid = Pid, challenger_won=undefined}) ->
+    lager:info("~p reports match is finished abnormally", [Pid]),
     NewData = Data#state{challenger_won = false},
     check_winner(NewData);
-handle_event(_State, cast, {done, Pid}, Data = #state{challengee_pid = Pid}) ->
+handle_event(_State, cast, {done, Pid}, Data = #state{challengee_pid = Pid, challengee_won=undefined}) ->
     lager:info("~p reports match is finished abnormally", [Pid]),
     NewData = Data#state{challenger_won = false},
     case check_winner(NewData) of
@@ -215,8 +218,11 @@ handle_event(_State, cast, {done, Pid}, Data = #state{challengee_pid = Pid}) ->
         Other ->
             Other
     end;
+handle_event(_State, cast, {done, _Pid}, _Data) ->
+    keep_state_and_data;
 
 handle_event(_State, state_timeout, finish_match, _Data) ->
+    lager:warning("ending match pid after one side failed to ever finish"),
     {stop, normal};
 handle_event(State, Type, Event, _Data) ->
     lager:info("got unhandled event ~p ~p in state ~p", [Type, Event, State]),
@@ -266,6 +272,7 @@ check_winner(NewData) ->
             quip(maps:get(name, NewData#state.challengee_info), maps:get(name, NewData#state.challenger_info)),
             {stop, normal};
         {false, false} ->
+            lager:warning("both participants claimed loss"),
             %% disconnect?
             {stop, normal};
         _ ->
