@@ -160,12 +160,24 @@ handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAM
                       Data
               end,
     {keep_state, NewData};
-handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_ACTION:8/integer, LastReceivedTick:32/integer-unsigned-big, LastHashTick:32/integer-unsigned-big, LastHash:32/integer-unsigned-big, LastTick:32/integer-unsigned-big, FrameAdvantage:8/integer-signed, Rest/binary>>}}, Data) ->
-    {HashKey, LastRecKey, FAKey, EventKey} =case Pid of
+handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_ACTION:8/integer, LastReceivedTick:32/integer-unsigned-big, LastHashTick:32/integer-unsigned-big, LastHash:32/integer-unsigned-big, LastTick:32/integer-unsigned-big, Rest0/binary>>}}, Data) ->
+
+    %% 0.8.1 lacked the backup ticks field
+    {BakTicks, FrameAdvantage, Rest} =
+    case verl:compare(maps:get(version, Data#state.challenger_info), <<"0.8.1">>) of
+        gt ->
+            <<BT:32/integer-unsigned-big, FA:8/integer-signed, R/binary>> = Rest0,
+            {BT, FA, R};
+        _ ->
+            <<FA:8/integer-signed, R/binary>> = Rest0,
+            {undefined, FA, R}
+    end,
+
+    {HashKey, LastRecKey, FAKey, EventKey, BakTickKey} =case Pid of
                               _ when Pid == Data#state.challenger_pid ->
-                                  {challenger_hash, challenger_last_received_tick, challenger_frame_advantage, challenger_events};
+                                  {challenger_hash, challenger_last_received_tick, challenger_frame_advantage, challenger_events, challenger_backup_ticks};
                               _ when Pid == Data#state.challengee_pid ->
-                                  {challengee_hash, challengee_last_received_tick, challengee_frame_advantage, challengee_events}
+                                  {challengee_hash, challengee_last_received_tick, challengee_frame_advantage, challengee_events, challengee_backup_ticks}
                           end,
     Event0 = maps:get(LastHashTick, Data#state.events, maps:new()),
     OldHash = maps:get(HashKey, Event0, undefined),
@@ -177,7 +189,14 @@ handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_
     end,
     Event1 = maps:put(FAKey, FrameAdvantage, maps:put(LastRecKey, LastReceivedTick, maps:get(LastTick, Data#state.events, maps:new()))),
 
-    Events = maps:put(LastTick, Event1, maps:put(LastHashTick, maps:put(HashKey, LastHash, Event0), Data#state.events)),
+    Event2 = case BakTicks of
+        undefined ->
+            Event1;
+        _ ->
+            maps:put(BakTickKey, BakTicks, Event1)
+    end,
+
+    Events = maps:put(LastTick, Event2, maps:put(LastHashTick, maps:put(HashKey, LastHash, Event0), Data#state.events)),
     NewEvents = insert_events(Events, EventKey, Rest),
     {keep_state, Data#state{events=NewEvents}};
 handle_event(connected, cast, {enet, _Pid, 2, _Event}, _Data) ->
