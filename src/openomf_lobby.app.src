@@ -11,7 +11,8 @@
                   enet,
                   lager,
 	          hackney,
-            iso8601
+            iso8601,
+            verl
                  ]},
   {env, []},
   {modules, []},

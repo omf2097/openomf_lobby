@@ -138,9 +138,11 @@ connected(cast, cancel, _Data) ->
     %% either side is cancelling
     {stop, cancel};
 connected(cast, {done, ChallengerPid, WonOrLost}, Data = #state{challenger_pid = ChallengerPid, challenger_won=undefined}) ->
+    lager:info("challenger won: ~p", [WonOrLost == 1]),
     NewData = Data#state{challenger_won = WonOrLost == 1},
     check_winner(NewData);
 connected(cast, {done, ChallengeePid, WonOrLost}, Data = #state{challengee_pid = ChallengeePid, challengee_won=undefined}) ->
+    lager:info("challengee won: ~p", [WonOrLost == 1]),
     NewData = Data#state{challengee_won = WonOrLost == 1},
     check_winner(NewData);
 connected(Type, Event, Data) ->
@@ -160,12 +162,24 @@ handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAM
                       Data
               end,
     {keep_state, NewData};
-handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_ACTION:8/integer, LastReceivedTick:32/integer-unsigned-big, LastHashTick:32/integer-unsigned-big, LastHash:32/integer-unsigned-big, LastTick:32/integer-unsigned-big, FrameAdvantage:8/integer-signed, Rest/binary>>}}, Data) ->
-    {HashKey, LastRecKey, FAKey, EventKey} =case Pid of
+handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_ACTION:8/integer, LastReceivedTick:32/integer-unsigned-big, LastHashTick:32/integer-unsigned-big, LastHash:32/integer-unsigned-big, LastTick:32/integer-unsigned-big, Rest0/binary>>}}, Data) ->
+
+    %% 0.8.1 lacked the backup ticks field
+    {BakTicks, FrameAdvantage, Rest} =
+    case verl:compare(maps:get(version, Data#state.challenger_info), <<"0.8.1">>) of
+        gt ->
+            <<BT:32/integer-unsigned-big, FA:8/integer-signed, R/binary>> = Rest0,
+            {BT, FA, R};
+        _ ->
+            <<FA:8/integer-signed, R/binary>> = Rest0,
+            {undefined, FA, R}
+    end,
+
+    {HashKey, LastRecKey, FAKey, EventKey, BakTickKey} =case Pid of
                               _ when Pid == Data#state.challenger_pid ->
-                                  {challenger_hash, challenger_last_received_tick, challenger_frame_advantage, challenger_events};
+                                  {challenger_hash, challenger_last_received_tick, challenger_frame_advantage, challenger_events, challenger_backup_ticks};
                               _ when Pid == Data#state.challengee_pid ->
-                                  {challengee_hash, challengee_last_received_tick, challengee_frame_advantage, challengee_events}
+                                  {challengee_hash, challengee_last_received_tick, challengee_frame_advantage, challengee_events, challengee_backup_ticks}
                           end,
     Event0 = maps:get(LastHashTick, Data#state.events, maps:new()),
     OldHash = maps:get(HashKey, Event0, undefined),
@@ -177,16 +191,24 @@ handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_
     end,
     Event1 = maps:put(FAKey, FrameAdvantage, maps:put(LastRecKey, LastReceivedTick, maps:get(LastTick, Data#state.events, maps:new()))),
 
-    Events = maps:put(LastTick, Event1, maps:put(LastHashTick, maps:put(HashKey, LastHash, Event0), Data#state.events)),
+    Event2 = case BakTicks of
+        undefined ->
+            Event1;
+        _ ->
+            maps:put(BakTickKey, BakTicks, Event1)
+    end,
+
+    Events = maps:put(LastTick, Event2, maps:put(LastHashTick, maps:put(HashKey, LastHash, Event0), Data#state.events)),
     NewEvents = insert_events(Events, EventKey, Rest),
     {keep_state, Data#state{events=NewEvents}};
 handle_event(connected, cast, {enet, _Pid, 2, _Event}, _Data) ->
     lager:info("unhandled enet event ~p", [_Event]),
     keep_state_and_data;
-handle_event(_State, cast, {done, Pid}, Data = #state{challenger_pid = Pid}) ->
+handle_event(_State, cast, {done, Pid}, Data = #state{challenger_pid = Pid, challenger_won=undefined}) ->
+    lager:info("~p reports match is finished abnormally", [Pid]),
     NewData = Data#state{challenger_won = false},
     check_winner(NewData);
-handle_event(_State, cast, {done, Pid}, Data = #state{challengee_pid = Pid}) ->
+handle_event(_State, cast, {done, Pid}, Data = #state{challengee_pid = Pid, challengee_won=undefined}) ->
     lager:info("~p reports match is finished abnormally", [Pid]),
     NewData = Data#state{challenger_won = false},
     case check_winner(NewData) of
@@ -196,8 +218,11 @@ handle_event(_State, cast, {done, Pid}, Data = #state{challengee_pid = Pid}) ->
         Other ->
             Other
     end;
+handle_event(_State, cast, {done, _Pid}, _Data) ->
+    keep_state_and_data;
 
 handle_event(_State, state_timeout, finish_match, _Data) ->
+    lager:warning("ending match pid after one side failed to ever finish"),
     {stop, normal};
 handle_event(State, Type, Event, _Data) ->
     lager:info("got unhandled event ~p ~p in state ~p", [Type, Event, State]),
@@ -247,6 +272,7 @@ check_winner(NewData) ->
             quip(maps:get(name, NewData#state.challengee_info), maps:get(name, NewData#state.challenger_info)),
             {stop, normal};
         {false, false} ->
+            lager:warning("both participants claimed loss"),
             %% disconnect?
             {stop, normal};
         _ ->
