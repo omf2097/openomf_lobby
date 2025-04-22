@@ -3,7 +3,7 @@
 -behaviour(supervisor).
 
 -export([start_link/0,
-         start_match/3]).
+         start_match/4]).
 
 -export([init/1]).
 
@@ -21,5 +21,5 @@ init(_Args) ->
                     shutdown => brutal_kill}],
     {ok, {SupFlags, ChildSpecs}}.
 
-start_match(ChallengerPid, ChallengerInfo, ChallengeePid) ->
-    supervisor:start_child(?MODULE, [ChallengerPid, ChallengerInfo, ChallengeePid]).
+start_match(ChallengerPid, ChallengerInfo, ChallengeePid, ChallengeeID) ->
+    supervisor:start_child(?MODULE, [ChallengerPid, ChallengerInfo, ChallengeePid, ChallengeeID]).
