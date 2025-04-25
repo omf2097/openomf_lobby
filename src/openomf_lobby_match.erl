@@ -12,6 +12,7 @@
 
 -record(pilot, {
           har_id :: non_neg_integer(),
+          pilot_id :: non_neg_integer(),
           power :: non_neg_integer(),
           agility :: non_neg_integer(),
           endurance :: non_neg_integer(),
@@ -36,7 +37,9 @@
           challengee_won = undefined :: undefined | boolean(),
           events = maps:new() :: map(),
           arena_id :: non_neg_integer(),
-          subscribers = [] :: [pid()]
+          subscribers = [] :: [pid()],
+          proposed_rands = [] :: [{integer(), integer()}],
+          confirmed_rand = 0 :: integer()
          }).
 
 -define(QUIPS, ["~s sent ~s straight to the scrap heap... with a warranty void receipt!",
@@ -52,6 +55,8 @@
 -define(PACKET_ANNOUNCEMENT, 9).
 
 -define(EVENT_TYPE_ACTION, 0).
+-define(EVENT_TYPE_PROPOSE_START, 2).
+-define(EVENT_TYPE_CONFIRM_START, 3).
 -define(EVENT_TYPE_GAME_INFO, 4).
 
 start_link(ChallengerPid, ChallengerInfo, ChallengeePid, ChallengeeID) ->
@@ -160,7 +165,7 @@ connected({call, From}, {subscribe, Channel, Pid, SuccessFun}, Data = #state{sub
     %% if both players have picked their pilots, send the info any any confirmed inputs
     case Data#state.challenger_pilot /= undefined andalso Data#state.challengee_pilot /= undefined of
         true ->
-            Packet0 = encode_match_data(Data#state.challenger_pilot, Data#state.challengee_pilot, Data#state.arena_id),
+            Packet0 = encode_match_data(Data#state.challenger_pilot, Data#state.challengee_pilot, Data#state.arena_id, Data#state.confirmed_rand),
             enet:send_reliable(Channel, Packet0),
             %% send the whole transcript, up to the last confirm frame
             L = lists:keysort(1, maps:to_list(Events)),
@@ -176,11 +181,11 @@ connected({call, From}, {subscribe, Channel, Pid, SuccessFun}, Data = #state{sub
 connected(Type, Event, Data) ->
     handle_event(?FUNCTION_NAME, Type, Event, Data).
 
-handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAME_INFO:8/integer, ArenaID:8/integer-unsigned, HARId:8/integer-unsigned,
+handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAME_INFO:8/integer, ArenaID:8/integer-unsigned, HARId:8/integer-unsigned, PilotId:8/integer-unsigned,
                                                          Power:8/integer-unsigned, Agility:8/integer-unsigned, Endurance:8/integer-unsigned,
                                                          PrimaryColor:8/integer-unsigned, SecondaryColor:8/integer-unsigned, TertiaryColor:8/integer-unsigned,
                                                          NameLen:8/integer-unsigned, Name:NameLen/binary>>}}, Data) ->
-    Pilot = #pilot{har_id = HARId, power = Power, endurance = Endurance, agility = Agility, primary_color = PrimaryColor, secondary_color = SecondaryColor, tertiary_color = TertiaryColor, name = Name},
+    Pilot = #pilot{har_id = HARId, pilot_id = PilotId, power = Power, endurance = Endurance, agility = Agility, primary_color = PrimaryColor, secondary_color = SecondaryColor, tertiary_color = TertiaryColor, name = Name},
     NewData = case Pid of
                   _ when Pid == Data#state.challenger_pid andalso Data#state.challenger_pilot == undefined ->
                       Data#state{challenger_pilot = Pilot, arena_id =ArenaID};
@@ -195,7 +200,7 @@ handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAM
             %% send the starting information to all waiting subscribers
             lists:foreach(
               fun({Channel, _Ref}) ->
-                      Packet0 = encode_match_data(NewData#state.challenger_pilot, NewData#state.challengee_pilot, NewData#state.arena_id),
+                      Packet0 = encode_match_data(NewData#state.challenger_pilot, NewData#state.challengee_pilot, NewData#state.arena_id, Data#state.confirmed_rand),
                       enet:send_reliable(Channel, Packet0)
               end, NewData#state.subscribers);
         false ->
@@ -203,6 +208,45 @@ handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAM
     end,
 
     {keep_state, NewData};
+
+
+handle_event(connected, cast, {enet, _Pid, 2, #reliable{ data = <<?EVENT_TYPE_PROPOSE_START:8/integer, PeerProposal:32/integer-unsigned-big, _LocalProposal:32/integer-unsigned-big, Seed:32/integer-unsigned-big>>}}, Data) ->
+    {keep_state, Data#state{proposed_rands = [{PeerProposal, Seed}|Data#state.proposed_rands]}};
+
+handle_event(connected, cast, {enet, _Pid, 2, #reliable{ data = <<?EVENT_TYPE_CONFIRM_START:8/integer, PeerProposal:32/integer-unsigned-big>>}}, Data) ->
+    {keep_state, Data#state{confirmed_rand = lists:keyfind(PeerProposal, 1, Data#state.proposed_rands) orelse 0}};
+
+
+handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAME_INFO:8/integer, ArenaID:8/integer-unsigned, HARId:8/integer-unsigned,
+                                                         Power:8/integer-unsigned, Agility:8/integer-unsigned, Endurance:8/integer-unsigned,
+                                                         PrimaryColor:8/integer-unsigned, SecondaryColor:8/integer-unsigned, TertiaryColor:8/integer-unsigned,
+                                                         NameLen:8/integer-unsigned, Name:NameLen/binary>>}}, Data) ->
+    %% XXX legacy version, remove after 0.8.2+
+    Pilot = #pilot{har_id = HARId, pilot_id = 0, power = Power, endurance = Endurance, agility = Agility, primary_color = PrimaryColor, secondary_color = SecondaryColor, tertiary_color = TertiaryColor, name = Name},
+    NewData = case Pid of
+                  _ when Pid == Data#state.challenger_pid andalso Data#state.challenger_pilot == undefined ->
+                      Data#state{challenger_pilot = Pilot, arena_id =ArenaID};
+                  _ when Pid == Data#state.challengee_pid andalso Data#state.challengee_pilot == undefined ->
+                      Data#state{challengee_pilot = Pilot, arena_id = ArenaID};
+                  _ ->
+                      Data
+              end,
+    %% check if we have just now gotten information from both sides
+    case Data /= NewData andalso NewData#state.challenger_pilot /= undefined andalso NewData#state.challengee_pilot /= undefined of
+        true ->
+            %% send the starting information to all waiting subscribers
+            lists:foreach(
+              fun({Channel, _Ref}) ->
+                      Packet0 = encode_match_data(NewData#state.challenger_pilot, NewData#state.challengee_pilot, NewData#state.arena_id, Data#state.confirmed_rand),
+                      enet:send_reliable(Channel, Packet0)
+              end, NewData#state.subscribers);
+        false ->
+            ok
+    end,
+
+    {keep_state, NewData};
+
+
 handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_ACTION:8/integer, LastReceivedTick:32/integer-signed-big, LastHashTick:32/integer-unsigned-big, LastHash:32/integer-unsigned-big, LastTick:32/integer-unsigned-big, Rest0/binary>>}}, Data) ->
 
     %% 0.8.1 lacked the backup ticks field
@@ -368,7 +412,6 @@ confirm_frame(Events, LastConfirmed) ->
 
 notify_subscribers(Data = #state{subscribers=Subs, events=Events}, PreviousConfirmed) ->
     Confirmed = confirm_frame(Data#state.events, PreviousConfirmed),
-    lager:info("confirmed frame went from ~p to ~p", [PreviousConfirmed, Confirmed]),
     %% find all the new events between the previous confirmed frame and the new one that have events
     L = [E || {T, M} = E <- lists:keysort(1, maps:to_list(Events)), T > PreviousConfirmed, T =< Confirmed, maps:is_key(challenger_events, M) orelse maps:is_key(challengee_events, M) ],
     Packet = encode_inputs(L, []),
@@ -395,9 +438,10 @@ packetize([Head | Tail]=Input, Size, ThisPacket, Packets) ->
             packetize(Input, Size, [], [lists:reverse(ThisPacket)|Packets])
     end.
 
-encode_match_data(Pilot1, Pilot2, ArenaID) ->
-    iolist_to_binary([<<0:8/integer>>, encode_pilot(Pilot1), encode_pilot(Pilot2), <<ArenaID:8/integer-unsigned>>]).
+encode_match_data(Pilot1, Pilot2, ArenaID, Seed) ->
+    iolist_to_binary([<<0:8/integer>>, encode_pilot(Pilot1), encode_pilot(Pilot2), <<Seed:32/integer-unsigned-big, ArenaID:8/integer-unsigned>>]).
 
-encode_pilot(#pilot{har_id = HARId, power = Power, agility = Agility, endurance = Endurance, primary_color = C1, secondary_color = C2, tertiary_color = C3, name = Name}) ->
+encode_pilot(#pilot{har_id = HARId, pilot_id = PilotId, power = Power, agility = Agility, endurance = Endurance, primary_color = C1, secondary_color = C2, tertiary_color = C3, name = Name}) ->
+    lager:info("encoding pilot ~p", [Name]),
     NameLen = byte_size(Name),
-    <<HARId:8/integer-unsigned, Power:8/integer-unsigned, Agility:8/integer-unsigned, Endurance:8/integer-unsigned, C1:8/integer-unsigned, C2:8/integer-unsigned, C3:8/integer-unsigned, NameLen:8/integer, Name/binary>>.
+    <<HARId:8/integer-unsigned, PilotId:8/integer-unsigned, Power:8/integer-unsigned, Agility:8/integer-unsigned, Endurance:8/integer-unsigned, C1:8/integer-unsigned, C2:8/integer-unsigned, C3:8/integer-unsigned, NameLen:8/integer, Name/binary>>.
