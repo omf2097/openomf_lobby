@@ -211,10 +211,17 @@ handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAM
 
 
 handle_event(connected, cast, {enet, _Pid, 2, #reliable{ data = <<?EVENT_TYPE_PROPOSE_START:8/integer, PeerProposal:32/integer-unsigned-big, _LocalProposal:32/integer-unsigned-big, Seed:32/integer-unsigned-big>>}}, Data) ->
+    lager:info("got proposed seed ~p at ~p", [Seed, PeerProposal]),
     {keep_state, Data#state{proposed_rands = [{PeerProposal, Seed}|Data#state.proposed_rands]}};
 
 handle_event(connected, cast, {enet, _Pid, 2, #reliable{ data = <<?EVENT_TYPE_CONFIRM_START:8/integer, PeerProposal:32/integer-unsigned-big>>}}, Data) ->
-    {keep_state, Data#state{confirmed_rand = lists:keyfind(PeerProposal, 1, Data#state.proposed_rands) orelse 0}};
+    lager:info("saw confirmation of seed ~p at ~p", [lists:keyfind(PeerProposal, 1, Data#state.proposed_rands), PeerProposal]),
+    Seed = case lists:keyfind(PeerProposal, 1, Data#state.proposed_rands) of
+               {PeerProposal, S} ->
+                   S;
+               _ -> 0
+           end,
+    {keep_state, Data#state{confirmed_rand=Seed}};
 
 
 handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAME_INFO:8/integer, ArenaID:8/integer-unsigned, HARId:8/integer-unsigned,
