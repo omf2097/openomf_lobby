@@ -413,7 +413,7 @@ handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CONNECTED:4/integer, 
     %% TODO relay the game packets via the server once both sides have failed to connect 2x
     {noreply, State};
 
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, _:4/integer>> }}, State = #state{peer_info=PeerInfo}) ->
+handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, Rest:4/integer>> }}, State = #state{peer_info=PeerInfo}) ->
 
     Channels = maps:get(channels, PeerInfo),
     Channel = maps:get(ChannelID, Channels),
@@ -430,8 +430,18 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, _:4
             ok
     end,
 
-    enet:send_reliable(Channel, encode_peer_to_presence(PeerInfo, 0)),
-    {noreply, State};
+    PeerInfo2 = case Rest of
+                    ?PRESENCE_AVAILABLE ->
+                        PI2 = maps:put(status, ?PRESENCE_AVAILABLE, State#state.peer_info),
+                        enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PI2, 0)),
+                        PI2;
+                    _ ->
+                        %% normal refresh
+                        PeerInfo
+                end,
+
+    enet:send_reliable(Channel, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply, State#state{peer_info=PeerInfo2}};
 
 handle_info({enet, _ChannelID, #reliable{ data = Packet }}, State) ->
     lager:info("got reliable packet ~p", [Packet]),
