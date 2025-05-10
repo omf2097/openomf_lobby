@@ -27,6 +27,7 @@
 -define(PACKET_REFRESH, 8).
 -define(PACKET_ANNOUNCEMENT, 9).
 -define(PACKET_RELAY, 10).
+-define(PACKET_SPECTATE, 11).
 
 -define(CHALLENGE_OFFER, 1).
 -define(CHALLENGE_ACCEPT, 1).
@@ -34,6 +35,9 @@
 -define(CHALLENGE_CANCEL, 3).
 -define(CHALLENGE_DONE, 4).
 -define(CHALLENGE_ERROR, 5).
+
+-define(SPECTATE_ACCEPT, 1).
+-define(SPECTATE_ERROR, 2).
 
 -define(JOIN_ERROR_NAME_USED, 1).
 -define(JOIN_ERROR_NAME_INVALID, 2).
@@ -335,20 +339,61 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, 0
     Channel = maps:get(ChannelID, Channels),
     case gproc:lookup_pids({n, l, {connect_id, ID}}) of
         [Pid] ->
-            case openomf_lobby_match_sup:start_match(self(), PeerInfo, Pid) of
-                {ok, MatchPid} ->
-                    PeerInfo2 = maps:put(status, ?PRESENCE_CHALLENGING, PeerInfo),
-                    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
-                    {noreply, State#state{match_pid =MatchPid, peer_info=PeerInfo2}};
-                {error, Reason} ->
-                    lager:info("failed to challenge ~p", [Reason]),
-                    ErrorString = list_to_binary(io_lib:format("Failed to challenge user: ~p", [Reason])),
+            case find_match_processes(ID) of
+                [] ->
+                    case openomf_lobby_match_sup:start_match(self(), PeerInfo, Pid, ID) of
+                        {ok, MatchPid} ->
+                            PeerInfo2 = maps:put(status, ?PRESENCE_CHALLENGING, PeerInfo),
+                            enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
+                            {noreply, State#state{match_pid =MatchPid, peer_info=PeerInfo2}};
+                        {error, Reason} ->
+                            lager:info("failed to challenge ~p", [Reason]),
+                            ErrorString = list_to_binary(io_lib:format("Failed to challenge user: ~p", [Reason])),
+                            enet:send_reliable(Channel, <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_ERROR:4/integer, ErrorString/binary>>),
+                            {noreply, State}
+                    end;
+                _ ->
+                    lager:info("failed to challenge: user busy"),
+                    ErrorString = <<"Failed to challenge user: user busy">>,
                     enet:send_reliable(Channel, <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_ERROR:4/integer, ErrorString/binary>>),
                     {noreply, State}
             end;
         _ ->
             %% user not found, probably just disconnected
             enet:send_reliable(Channel, <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_ERROR:4/integer, "User not found">>),
+            {noreply, State}
+    end;
+
+handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_SPECTATE:4/unsigned-integer, 0:4/integer, ID:32/integer-unsigned-big>> }}, State = #state{peer_info=PeerInfo}) ->
+    Channels = maps:get(channels, PeerInfo),
+    LobbyChannel = maps:get(ChannelID, Channels),
+    case find_match_processes(ID) of
+        [Pid] ->
+            lager:info("sending spectate request to ~p", [Pid]),
+            Channel = maps:get(2, Channels),
+            OkFun = fun() -> 
+                    enet:send_reliable(LobbyChannel, <<?PACKET_SPECTATE:4/integer, ?SPECTATE_ACCEPT:4/integer>>)
+                  end,
+            try gen_statem:call(Pid, {subscribe, Channel, self(), OkFun}) of
+                ok ->
+                    PeerInfo2 = maps:put(status, ?PRESENCE_WATCHING, PeerInfo),
+                    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
+                    {noreply, State#state{peer_info=PeerInfo2}};
+                Error ->
+                    lager:warning("unexpected spectate result ~p", [Error]),
+                      ErrorString = list_to_binary(io_lib:format("Failed to spectate match: ~p", [Error])),
+                      enet:send_reliable(LobbyChannel, <<?PACKET_SPECTATE:4/integer, ?SPECTATE_ERROR:4/integer, ErrorString/binary>>),
+                      {noreply, State}
+            catch What:Why ->
+                      lager:info("failed to spectate ~p", [{What, Why}]),
+                      ErrorString = list_to_binary(io_lib:format("Failed to spectate match: ~p", [{What, Why}])),
+                      enet:send_reliable(LobbyChannel, <<?PACKET_SPECTATE:4/integer, ?SPECTATE_ERROR:4/integer, ErrorString/binary>>),
+                      {noreply, State}
+            end;
+        _ ->
+            lager:info("failed to spectate: no such match"),
+            ErrorString = <<"Failed to spectate match: no such match">>,
+            enet:send_reliable(LobbyChannel, <<?PACKET_SPECTATE:4/integer, ?SPECTATE_ERROR:4/integer, ErrorString/binary>>),
             {noreply, State}
     end;
 
@@ -368,7 +413,7 @@ handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CONNECTED:4/integer, 
     %% TODO relay the game packets via the server once both sides have failed to connect 2x
     {noreply, State};
 
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, _:4/integer>> }}, State = #state{peer_info=PeerInfo}) ->
+handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, Rest:4/integer>> }}, State = #state{peer_info=PeerInfo}) ->
 
     Channels = maps:get(channels, PeerInfo),
     Channel = maps:get(ChannelID, Channels),
@@ -385,8 +430,18 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, _:4
             ok
     end,
 
-    enet:send_reliable(Channel, encode_peer_to_presence(PeerInfo, 0)),
-    {noreply, State};
+    PeerInfo2 = case Rest of
+                    ?PRESENCE_AVAILABLE ->
+                        PI2 = maps:put(status, ?PRESENCE_AVAILABLE, State#state.peer_info),
+                        enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PI2, 0)),
+                        PI2;
+                    _ ->
+                        %% normal refresh
+                        PeerInfo
+                end,
+
+    enet:send_reliable(Channel, encode_peer_to_presence(PeerInfo2, 0)),
+    {noreply, State#state{peer_info=PeerInfo2}};
 
 handle_info({enet, _ChannelID, #reliable{ data = Packet }}, State) ->
     lager:info("got reliable packet ~p", [Packet]),
@@ -430,4 +485,21 @@ user_leave_event(Name) ->
 			hackney:request(post, URL, [{<<"Content-Type">>, <<"application/json">>}], <<"{\"content\": \"'", Name/binary, "' has left the arena\" }">>, [])
 	end.
 
-
+find_match_processes(KnownID) ->
+    %% Construct a match specification to check both ID positions
+    MatchSpec = [{
+      %% Match the key pattern {n, l, {match, '$1', '$2'}}
+      { {n, l, {match, '$1', '$2'}}, '_', '_' },
+      %% Guard: Check if either '$1' or '$2' equals KnownID
+      [{'orelse', {'=:=', '$1', KnownID}, {'=:=', '$2', KnownID}}],
+      %% Return all matched entries
+      ['$_']
+     }],
+    %% Execute the select query on the local registry
+    case gproc:select(n, MatchSpec) of
+        [] -> 
+            [];  %% No processes found
+        Entries -> 
+            %% Extract PIDs from the matched entries
+            [Pid || {_, Pid, _} <- Entries]
+    end.
