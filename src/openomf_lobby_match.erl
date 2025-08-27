@@ -383,11 +383,7 @@ quip(Winner, Loser) ->
     enet:broadcast_reliable(2098, 0, <<?PACKET_ANNOUNCEMENT:4/integer, 0:4/integer, Bin/binary, 0>>),
     %% Record the match completion for activity tracking
     openomf_lobby_client_sup:record_last_match(Winner, Loser),
-    case application:get_env(discord_callback) of
-        undefined -> ok;
-        {ok, URL} ->
-            hackney:request(post, URL, [{<<"Content-Type">>, <<"application/json">>}], <<"{\"content\": \"", Bin/binary, "\" }">>, [])
-    end.
+    openomf_lobby_discord_port:send_match_result(Winner, Loser, Bin).
 
 insert_events(Events, _, <<>>) ->
     Events;

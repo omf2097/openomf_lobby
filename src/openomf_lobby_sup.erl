@@ -22,5 +22,10 @@ init(_Args) ->
                     start => {openomf_lobby_match_sup, start_link, []},
                     type => worker,
                     restart => permanent,
-                    shutdown => brutal_kill}],
+                    shutdown => brutal_kill},
+                 #{id => openomf_lobby_discord_port,
+                    start => {openomf_lobby_discord_port, start_link, []},
+                    type => worker,
+                    restart => permanent,
+                    shutdown => 5000}],
     {ok, {SupFlags, ChildSpecs}}.

@@ -315,13 +315,7 @@ handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_YELL:4/integer, 0:4/i
     lager:info("client ~p yelled ~s", [State#state.name, Yell]),
     enet:broadcast_reliable(2098, 0, <<?PACKET_YELL:4/integer, 0:4/integer, Name/binary, ": ", Yell/binary, 0>>),
     %% Bridge chat message to Discord
-    case application:get_env(discord_callback) of
-        undefined -> ok;
-        {ok, URL} ->
-            ChatMessage = iolist_to_binary(io_lib:format("**~s**: ~s", [Name, Yell])),
-            DiscordPayload = <<"{\"content\": \"", ChatMessage/binary, "\" }">>,
-            hackney:request(post, URL, [{<<"Content-Type">>, <<"application/json">>}], DiscordPayload, [])
-    end,
+    openomf_lobby_discord_port:send_chat(Name, Yell),
     {noreply ,State};
 
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_ACCEPT:4/integer>> }}, State = #state{match_pid=MatchPid}) when MatchPid /= undefined ->
@@ -484,18 +478,10 @@ encode_peer_to_presence(PeerInfo, NewlyJoined) ->
 
 
 user_joined_event(Name) ->
-	case application:get_env(discord_callback) of
-		undefined -> ok;
-		{ok, URL} ->
-			hackney:request(post, URL, [{<<"Content-Type">>, <<"application/json">>}], <<"{\"content\": \"'", Name/binary, "' has entered the arena\" }">>, [])
-	end.
+	openomf_lobby_discord_port:send_user_join(Name).
 
 user_leave_event(Name) ->
-	case application:get_env(discord_callback) of
-		undefined -> ok;
-		{ok, URL} ->
-			hackney:request(post, URL, [{<<"Content-Type">>, <<"application/json">>}], <<"{\"content\": \"'", Name/binary, "' has left the arena\" }">>, [])
-	end.
+	openomf_lobby_discord_port:send_user_leave(Name).
 
 find_match_processes(KnownID) ->
     %% Construct a match specification to check both ID positions
