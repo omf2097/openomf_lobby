@@ -381,6 +381,8 @@ quip(Winner, Loser) ->
     Quip = lists:nth(E, ?QUIPS),
     Bin = iolist_to_binary(io_lib:format(Quip, [Winner, Loser])),
     enet:broadcast_reliable(2098, 0, <<?PACKET_ANNOUNCEMENT:4/integer, 0:4/integer, Bin/binary, 0>>),
+    %% Record the match completion for activity tracking
+    openomf_lobby_client_sup:record_last_match(Winner, Loser),
     case application:get_env(discord_callback) of
         undefined -> ok;
         {ok, URL} ->

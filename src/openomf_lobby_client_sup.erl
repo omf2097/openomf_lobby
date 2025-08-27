@@ -3,11 +3,15 @@
 -behaviour(supervisor).
 
 -export([start_link/0,
-         start_client/1, client_presence/0, announce/1]).
+         start_client/1, client_presence/0, announce/1,
+         record_last_match/2, record_last_activity/1,
+         get_last_match/0, get_last_activity/0]).
 
 -export([init/1]).
 
 start_link() ->
+      % Create ETS table for tracking activity
+      ets:new(lobby_activity, [named_table, public, set]),
       supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init(_Args) ->
@@ -32,3 +36,23 @@ announce(Message) ->
     Children = supervisor:which_children(?MODULE),
     [ openomf_lobby_client:announce(Pid, Message) || {_Id, Pid, _Type, _Modules} <- Children].
 
+%% Activity tracking functions
+record_last_match(Winner, Loser) ->
+    Timestamp = erlang:system_time(second),
+    ets:insert(lobby_activity, {last_match, {Timestamp, Winner, Loser}}).
+
+record_last_activity(PlayerName) ->
+    Timestamp = erlang:system_time(second),
+    ets:insert(lobby_activity, {last_activity, {Timestamp, PlayerName}}).
+
+get_last_match() ->
+    case ets:lookup(lobby_activity, last_match) of
+        [{last_match, Data}] -> {ok, Data};
+        [] -> undefined
+    end.
+
+get_last_activity() ->
+    case ets:lookup(lobby_activity, last_activity) of
+        [{last_activity, Data}] -> {ok, Data};
+        [] -> undefined
+    end.

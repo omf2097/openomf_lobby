@@ -75,7 +75,7 @@ init(PeerInfo) ->
 handle_call(_, _, State) ->
     {reply, error, State}.
 
-handle_cast({get_presence, From}, State = #state{name=Name, version=Version}) when is_binary(Name) ->
+handle_cast({get_presence, From}, State = #state{name=Name}) when is_binary(Name) ->
     gen_server:cast(From, {presence, encode_peer_to_presence(State#state.peer_info, 0)}),
     {noreply, State};
 
@@ -87,7 +87,7 @@ handle_cast({challenge, From, ChallengerID, Version}, State = #state{name=Name, 
     enet:send_reliable(Channel, Packet),
     PeerInfo2 = maps:put(status, ?PRESENCE_PONDERING, PeerInfo),
     enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
-    %% TODO 
+    %% TODO
     {noreply, State#state{match_pid=From, peer_info=PeerInfo2}};
 
 handle_cast({challenge, From, _ChallengerID, _Version}, State = #state{name=Name, match_pid=MatchPid}) when is_binary(Name), is_pid(MatchPid) ->
@@ -97,7 +97,7 @@ handle_cast({challenge, From, _ChallengerID, _Version}, State = #state{name=Name
 
 handle_cast({challenge, From, _ChallengerID, TheirVersion}, State = #state{name=Name, version=OurVersion, match_pid=undefined}) when is_binary(Name) andalso TheirVersion /= OurVersion ->
     gen_server:cast(From, {incompatible, self()}),
-    %% TODO 
+    %% TODO
     {noreply, State};
 
 handle_cast(accepted, State = #state{peer_info=PeerInfo, match_pid = MatchPid}) when is_pid(MatchPid) ->
@@ -172,6 +172,8 @@ handle_info({'EXIT', PeerPid, _Reason}, State = #state{name=Name, peer_pid=PeerP
     RFU = 0,
     ConnectID = maps:get(connect_id, State#state.peer_info),
     user_leave_event(Name),
+    %% Record last player activity
+    openomf_lobby_client_sup:record_last_activity(Name),
     enet:broadcast_reliable(2098, 0, <<?PACKET_DISCONNECT:4/integer, RFU:4/integer, ConnectID:32/integer-unsigned-big>>),
     {stop, normal, State};
 
@@ -266,6 +268,8 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyV
                 lager:info("motd is ~p", [Message]),
                 enet:send_reliable(Channel, <<?PACKET_ANNOUNCEMENT:4/integer, 0:4/integer, Message/binary, 0>>)
         end,
+        %% Send last match and activity info
+        send_activity_info(Channel),
 		    {noreply ,State#state{name = Name, version = Version, protocol_version = LobbyVersion, peer_info = PeerInfo2}}
 	    catch _:_ ->
 		    %% user already registered
@@ -310,6 +314,14 @@ handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_YELL:4/integer, 0:4/i
     end,
     lager:info("client ~p yelled ~s", [State#state.name, Yell]),
     enet:broadcast_reliable(2098, 0, <<?PACKET_YELL:4/integer, 0:4/integer, Name/binary, ": ", Yell/binary, 0>>),
+    %% Bridge chat message to Discord
+    case application:get_env(discord_callback) of
+        undefined -> ok;
+        {ok, URL} ->
+            ChatMessage = iolist_to_binary(io_lib:format("**~s**: ~s", [Name, Yell])),
+            DiscordPayload = <<"{\"content\": \"", ChatMessage/binary, "\" }">>,
+            hackney:request(post, URL, [{<<"Content-Type">>, <<"application/json">>}], DiscordPayload, [])
+    end,
     {noreply ,State};
 
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_ACCEPT:4/integer>> }}, State = #state{match_pid=MatchPid}) when MatchPid /= undefined ->
@@ -371,7 +383,7 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_SPECTATE:4/unsigned-in
         [Pid] ->
             lager:info("sending spectate request to ~p", [Pid]),
             Channel = maps:get(2, Channels),
-            OkFun = fun() -> 
+            OkFun = fun() ->
                     enet:send_reliable(LobbyChannel, <<?PACKET_SPECTATE:4/integer, ?SPECTATE_ACCEPT:4/integer>>)
                   end,
             try gen_statem:call(Pid, {subscribe, Channel, self(), OkFun}) of
@@ -497,9 +509,74 @@ find_match_processes(KnownID) ->
      }],
     %% Execute the select query on the local registry
     case gproc:select(n, MatchSpec) of
-        [] -> 
+        [] ->
             [];  %% No processes found
-        Entries -> 
+        Entries ->
             %% Extract PIDs from the matched entries
             [Pid || {_, Pid, _} <- Entries]
+    end.
+
+%% Format relative time from timestamp
+format_relative_time(Timestamp) ->
+    Now = erlang:system_time(second),
+    Diff = Now - Timestamp,
+
+    if
+        Diff < 60 ->
+            "just now";
+        Diff < 3600 ->
+            Minutes = Diff div 60,
+            case Minutes of
+                1 -> "1 minute ago";
+                _ -> io_lib:format("~p minutes ago", [Minutes])
+            end;
+        Diff < 86400 ->
+            Hours = Diff div 3600,
+            case Hours of
+                1 -> "1 hour ago";
+                _ -> io_lib:format("~p hours ago", [Hours])
+            end;
+        Diff < 604800 ->
+            Days = Diff div 86400,
+            case Days of
+                1 -> "1 day ago";
+                _ -> io_lib:format("~p days ago", [Days])
+            end;
+        true ->
+            Weeks = Diff div 604800,
+            case Weeks of
+                1 -> "1 week ago";
+                _ -> io_lib:format("~p weeks ago", [Weeks])
+            end
+    end.
+
+%% Send activity information to a newly joined client
+send_activity_info(Channel) ->
+    %% Check if there are other players online
+    Children = supervisor:which_children(openomf_lobby_client_sup),
+    ActivePlayerCount = length([Pid || {_Id, Pid, _Type, _Modules} <- Children, Pid /= self()]),
+
+    %% Send last match info
+    case openomf_lobby_client_sup:get_last_match() of
+        {ok, {Timestamp, Winner, Loser}} ->
+            RelativeTime = format_relative_time(Timestamp),
+            Message = iolist_to_binary(io_lib:format("Last match: ~s defeated ~s ~s", [Winner, Loser, RelativeTime])),
+            enet:send_reliable(Channel, <<?PACKET_ANNOUNCEMENT:4/integer, 0:4/integer, Message/binary, 0>>);
+        undefined ->
+            ok
+    end,
+
+    %% Send last activity info only if no other players are online
+    case ActivePlayerCount of
+        0 ->
+            case openomf_lobby_client_sup:get_last_activity() of
+                {ok, {ActivityTimestamp, PlayerName}} ->
+                    ActivityRelativeTime = format_relative_time(ActivityTimestamp),
+                    ActivityMessage = iolist_to_binary(io_lib:format("Last player online: ~s ~s", [PlayerName, ActivityRelativeTime])),
+                    enet:send_reliable(Channel, <<?PACKET_ANNOUNCEMENT:4/integer, 0:4/integer, ActivityMessage/binary, 0>>);
+                undefined ->
+                    ok
+            end;
+        _ ->
+            ok
     end.
