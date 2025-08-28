@@ -123,6 +123,53 @@ async fn handle_erlang_message(
     Ok(())
 }
 
+async fn create_and_start_client(
+    token: &str,
+    channel_id: ChannelId,
+    http: std::sync::Arc<serenity::http::Http>,
+    cancel_token: CancellationToken,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Try privileged intents first
+    eprintln!("🔌 Attempting connection with privileged intents...");
+    let privileged_intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
+    let mut client = Client::builder(token, privileged_intents)
+        .event_handler(Handler { channel_id })
+        .await?;
+
+    match client.start().await {
+        Ok(()) => {
+            eprintln!("✅ Connected with privileged intents (MESSAGE_CONTENT enabled)");
+            Ok(())
+        }
+        Err(serenity::Error::Gateway(serenity::gateway::GatewayError::DisallowedGatewayIntents)) => {
+            eprintln!("⚠️  Privileged intents not allowed, retrying with basic intents");
+            eprintln!("   Enable 'Message Content Intent' in Discord Developer Portal for full functionality");
+
+            // Create new client with basic intents only
+            eprintln!("🔌 Retrying connection with basic intents...");
+            let basic_intents = GatewayIntents::GUILD_MESSAGES;
+            let mut basic_client = Client::builder(token, basic_intents)
+                .event_handler(Handler { channel_id })
+                .await?;
+
+            match basic_client.start().await {
+                Ok(()) => {
+                    eprintln!("⚠️  Connected with basic intents (Discord→Lobby messages disabled)");
+                    Ok(())
+                }
+                Err(why) => {
+                    eprintln!("❌ Client error even with basic intents: {:?}", why);
+                    Err(Box::new(why))
+                }
+            }
+        }
+        Err(why) => {
+            eprintln!("❌ Client error: {:?}", why);
+            Err(Box::new(why))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set");
@@ -133,20 +180,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let channel_id = ChannelId::new(channel_id);
 
-    // Set gateway intents
-    let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
-
-    let mut client = Client::builder(&token, intents)
-        .event_handler(Handler { channel_id })
+    // Create a temporary client to get HTTP handle for stdin handler
+    let temp_client = Client::builder(&token, GatewayIntents::empty())
         .await
-        .expect("Error creating client");
+        .expect("Error creating temporary client");
+    let http = temp_client.http.clone();
 
-    let http = client.http.clone();
     let cancel_token = CancellationToken::new();
     let cancel_clone = cancel_token.clone();
 
     // Spawn stdin handler
-    let stdin_handle = tokio::spawn(handle_stdin(http, channel_id, cancel_clone));
+    let _stdin_handle = tokio::spawn(handle_stdin(http.clone(), channel_id, cancel_clone));
 
     // Handle Ctrl+C
     let cancel_for_signal = cancel_token.clone();
@@ -155,15 +199,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cancel_for_signal.cancel();
     });
 
-    // Start Discord client
+    // Start Discord client with intent fallback
     tokio::select! {
-        result = client.start() => {
+        result = create_and_start_client(&token, channel_id, http, cancel_token.clone()) => {
             if let Err(why) = result {
-                eprintln!("Client error: {:?}", why);
+                eprintln!("Failed to start Discord client: {:?}", why);
             }
         }
-        _ = stdin_handle => {
-            // stdin handler finished
+        _ = cancel_token.cancelled() => {
+            eprintln!("Shutting down...");
         }
     }
 

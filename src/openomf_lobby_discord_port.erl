@@ -126,7 +126,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%====================================================================
 
 spawn_discord_bot(Token, ChannelId) ->
-    BotBinary = filename:join([code:priv_dir(openomf_lobby), "discord_bot"]),
+    BotBinary = filename:join([code:priv_dir(openomf_lobby), "discord_bot_binary"]),
     case filelib:is_file(BotBinary) of
         false ->
             lager:error("Discord bot binary not found at ~s", [BotBinary]),

@@ -7,7 +7,7 @@
 -record(state, {peer_info :: map(),
                 peer_pid :: pid(),
                 match_pid :: undefined | pid(),
-                protocol_version :: non_neg_integer(),
+                protocol_version :: undefined | non_neg_integer(),
                 name :: undefined | binary(),
                 version :: undefined | binary(),
                 relays=#{} :: map()
@@ -295,7 +295,7 @@ handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_YELL:4/integer, 0:4/i
     %% check if this is a whisper by looking if there's a username and a colon prefixed
     case binary:split(Yell, <<":">>) of
         [MaybeUser, MaybeMessage] ->
-            case gproc:lookup_pids({n, l, {username, MaybeUser}}, self()) of
+            case gproc:lookup_pids({n, l, {username, MaybeUser}}) of
                 [Pid] ->
                     Message = case MaybeMessage of
                                   <<" ", Rest/binary>> ->

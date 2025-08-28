@@ -36,8 +36,8 @@
           challenger_won = undefined :: undefined | boolean(),
           challengee_won = undefined :: undefined | boolean(),
           events = maps:new() :: map(),
-          arena_id :: non_neg_integer(),
-          subscribers = [] :: [pid()],
+          arena_id :: undefined | non_neg_integer(),
+          subscribers = [] :: [{term(), pid()}],
           proposed_rands = [] :: [{integer(), integer()}],
           confirmed_rand = 0 :: integer()
          }).

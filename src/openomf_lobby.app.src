@@ -9,6 +9,8 @@
                   kernel,
                   stdlib,
                   enet,
+                  gproc,
+                  jsx,
                   lager,
 	          hackney,
             iso8601,
