@@ -76,7 +76,7 @@ handle_call(_, _, State) ->
     {reply, error, State}.
 
 handle_cast({get_presence, From}, State = #state{name=Name}) when is_binary(Name) ->
-    gen_server:cast(From, {presence, encode_peer_to_presence(State#state.peer_info, 0)}),
+    gen_server:cast(From, {presence, encode_peer_to_presence(State#state.peer_info, 0, State#state.protocol_version)}),
     {noreply, State};
 
 handle_cast({challenge, From, ChallengerID, Version}, State = #state{name=Name, version=Version, match_pid=undefined, peer_info=PeerInfo}) when is_binary(Name) ->
@@ -86,7 +86,7 @@ handle_cast({challenge, From, ChallengerID, Version}, State = #state{name=Name, 
     Channel = maps:get(0, Channels),
     enet:send_reliable(Channel, Packet),
     PeerInfo2 = maps:put(status, ?PRESENCE_PONDERING, PeerInfo),
-    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
+    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0, State#state.protocol_version)),
     %% TODO
     {noreply, State#state{match_pid=From, peer_info=PeerInfo2}};
 
@@ -130,17 +130,17 @@ handle_cast({set_state, GameState}, State = #state{peer_info=PeerInfo}) ->
     end,
 
     PeerInfo2 = maps:put(status, NewPresence, PeerInfo),
-    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
+    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0, State#state.protocol_version)),
     {noreply, State#state{peer_info=PeerInfo2}};
 
 handle_cast(won, State = #state{peer_info=PeerInfo}) ->
     NewPeerInfo = maps:put(wins, maps:get(wins, PeerInfo, 0) + 1, PeerInfo),
-    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(NewPeerInfo, 0)),
+    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(NewPeerInfo, 0, State#state.protocol_version)),
     {noreply, State#state{peer_info=NewPeerInfo}};
 
 handle_cast(lost, State = #state{peer_info=PeerInfo}) ->
     NewPeerInfo = maps:put(losses, maps:get(losses, PeerInfo, 0) + 1, PeerInfo),
-    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(NewPeerInfo, 0)),
+    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(NewPeerInfo, 0, State#state.protocol_version)),
     {noreply, State#state{peer_info=NewPeerInfo}};
 
 handle_cast({presence, Msg}, State = #state{peer_info = PeerInfo}) ->
@@ -209,7 +209,7 @@ handle_info({'EXIT', MatchPid, Reason}, State = #state{match_pid = MatchPid, pee
     end,
 
     NewPeerInfo = maps:put(status, ?PRESENCE_AVAILABLE, PeerInfo),
-    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(NewPeerInfo, 0)),
+    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(NewPeerInfo, 0, State#state.protocol_version)),
     {noreply, State#state{peer_info=NewPeerInfo, match_pid=undefined, relays=#{}}};
 
 handle_info({enet, ChannelID, Event}, State = #state{match_pid = MatchPid}) when is_pid(MatchPid) andalso ChannelID > 0 ->
@@ -246,6 +246,11 @@ handle_info({enet, _ChannelID, #unreliable{ data = Packet }}, State) ->
     {noreply, State};
 
 handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyVersion:4/integer, ExtPort:16/integer-unsigned-big, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State = #state{name=undefined}) when LobbyVersion == 0 ->
+
+    %% convert to version with match settings
+    handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyVersion:4/integer,   ExtPort:16/integer-unsigned-big, 0:112/integer, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State);
+
+handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyVersion:4/integer, ExtPort:16/integer-unsigned-big, MatchSettings:14/binary, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State = #state{name=undefined}) ->
     lager:info("client has named themselves ~s and has an external port of ~p", [Name, ExtPort]),
     %% TODO check for a name conflict!
     %% and that the name is not too long, etc
@@ -259,8 +264,8 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyV
 		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>),
         openomf_lobby_client_sup:client_presence(),
 		    %% broadcast the user join...
-        PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, maps:put(external_port, ExtPort, maps:put(version, Version, maps:put(name, Name, State#state.peer_info)))),
-		    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 1)),
+        PeerInfo2 = maps:put(match_settings, MatchSettings, maps:put(status, ?PRESENCE_AVAILABLE, maps:put(external_port, ExtPort, maps:put(version, Version, maps:put(name, Name, State#state.peer_info))))),
+		    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 1, State#state.protocol_version)),
 		    user_joined_event(Name),
         case application:get_env(motd) of
             undefined -> ok;
@@ -325,14 +330,14 @@ handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, 
     unlink(MatchPid),
     gen_statem:cast(MatchPid, reject),
     PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, State#state.peer_info),
-    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
+    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0, State#state.protocol_version)),
     {noreply, State#state{match_pid=undefined, peer_info=PeerInfo2, relays=#{}}};
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_CANCEL:4/integer>> }}, State = #state{match_pid=MatchPid}) when MatchPid /= undefined ->
     %% user is cancelling their challenge
     unlink(MatchPid),
     gen_statem:cast(MatchPid, cancel),
     PeerInfo2 = maps:put(status, ?PRESENCE_AVAILABLE, State#state.peer_info),
-    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
+    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0, State#state.protocol_version)),
     {noreply, State#state{match_pid=undefined, peer_info=PeerInfo2, relays=#{}}};
 handle_info({enet, _ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, ?CHALLENGE_DONE:4/integer, Result:8/integer>> }}, State = #state{match_pid=MatchPid}) when MatchPid /= undefined ->
     gen_statem:cast(MatchPid, {done, self(), Result}),
@@ -350,7 +355,7 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_CHALLENGE:4/integer, 0
                     case openomf_lobby_match_sup:start_match(self(), PeerInfo, Pid, ID) of
                         {ok, MatchPid} ->
                             PeerInfo2 = maps:put(status, ?PRESENCE_CHALLENGING, PeerInfo),
-                            enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
+                            enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0, State#state.protocol_version)),
                             {noreply, State#state{match_pid =MatchPid, peer_info=PeerInfo2}};
                         {error, Reason} ->
                             lager:info("failed to challenge ~p", [Reason]),
@@ -383,7 +388,7 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_SPECTATE:4/unsigned-in
             try gen_statem:call(Pid, {subscribe, Channel, self(), OkFun}) of
                 ok ->
                     PeerInfo2 = maps:put(status, ?PRESENCE_WATCHING, PeerInfo),
-                    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0)),
+                    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 0, State#state.protocol_version)),
                     {noreply, State#state{peer_info=PeerInfo2}};
                 Error ->
                     lager:warning("unexpected spectate result ~p", [Error]),
@@ -439,14 +444,14 @@ handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_REFRESH:4/integer, Res
     PeerInfo2 = case Rest of
                     ?PRESENCE_AVAILABLE ->
                         PI2 = maps:put(status, ?PRESENCE_AVAILABLE, State#state.peer_info),
-                        enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PI2, 0)),
+                        enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PI2, 0, State#state.protocol_version)),
                         PI2;
                     _ ->
                         %% normal refresh
                         PeerInfo
                 end,
 
-    enet:send_reliable(Channel, encode_peer_to_presence(PeerInfo2, 0)),
+    enet:send_reliable(Channel, encode_peer_to_presence(PeerInfo2, 0, State#state.protocol_version)),
     {noreply, State#state{peer_info=PeerInfo2}};
 
 handle_info({enet, _ChannelID, #reliable{ data = Packet }}, State) ->
@@ -462,7 +467,7 @@ handle_info(Msg, State) ->
     lager:info("unhandled ~p", [Msg]),
     {noreply, State}.
 
-encode_peer_to_presence(PeerInfo, NewlyJoined) ->
+encode_peer_to_presence(PeerInfo, NewlyJoined, LobbyVersion) ->
     RFU = 0,
     ConnectID = maps:get(connect_id, PeerInfo),
     {A, B, C, D} = maps:get(ip, PeerInfo),
@@ -474,7 +479,14 @@ encode_peer_to_presence(PeerInfo, NewlyJoined) ->
     Version = maps:get(version, PeerInfo),
     Name = maps:get(name, PeerInfo),
     VersionLen = byte_size(Version),
-    <<?PACKET_PRESENCE:4/integer, NewlyJoined:1/integer, RFU:3/integer, ConnectID:32/integer-unsigned-big, D:8/integer, C:8/integer, B:8/integer, A:8/integer, Port:16/integer, ExtPort:16/integer, Wins:8/integer, Losses:8/integer, Status:8/integer, VersionLen:8/integer, Version/binary, Name/binary>>.
+    case LobbyVersion of
+        0 ->
+            <<?PACKET_PRESENCE:4/integer, NewlyJoined:1/integer, RFU:3/integer, ConnectID:32/integer-unsigned-big, D:8/integer, C:8/integer, B:8/integer, A:8/integer, Port:16/integer, ExtPort:16/integer, Wins:8/integer, Losses:8/integer, Status:8/integer, VersionLen:8/integer, Version/binary, Name/binary>>;
+        _ ->
+            MatchSettings = maps:get(match_settings, PeerInfo, <<0:112/integer>>),
+            <<?PACKET_PRESENCE:4/integer, NewlyJoined:1/integer, RFU:3/integer, ConnectID:32/integer-unsigned-big, D:8/integer, C:8/integer, B:8/integer, A:8/integer, Port:16/integer, ExtPort:16/integer, Wins:8/integer, Losses:8/integer, Status:8/integer, MatchSettings/binary, VersionLen:8/integer, Version/binary, Name/binary>>
+    end.
+
 
 
 user_joined_event(Name) ->
