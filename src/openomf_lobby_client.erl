@@ -247,40 +247,12 @@ handle_info({enet, _ChannelID, #unreliable{ data = Packet }}, State) ->
 
 handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyVersion:4/integer, ExtPort:16/integer-unsigned-big, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State = #state{name=undefined}) when LobbyVersion == 0 ->
 
-    %% convert to version with match settings
-    handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyVersion:4/integer,   ExtPort:16/integer-unsigned-big, 0:112/integer, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State);
+    do_join(State, ChannelID, LobbyVersion, ExtPort, Version, Name, <<0:112/integer>>);
 
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyVersion:4/integer, ExtPort:16/integer-unsigned-big, MatchSettings:14/binary, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State = #state{name=undefined}) ->
-    lager:info("client has named themselves ~s and has an external port of ~p", [Name, ExtPort]),
-    %% TODO check for a name conflict!
-    %% and that the name is not too long, etc
-    PeerInfo = State#state.peer_info,
-    Channels = maps:get(channels, PeerInfo),
-    Channel = maps:get(ChannelID, Channels),
-    ConnectID = maps:get(connect_id, PeerInfo),
-    try gproc:reg({n, l, {username, Name}}, self()) of
-	    true ->
-		    %% confirm the join and tell the user their connect ID
-		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>),
-        openomf_lobby_client_sup:client_presence(),
-		    %% broadcast the user join...
-        PeerInfo2 = maps:put(match_settings, MatchSettings, maps:put(status, ?PRESENCE_AVAILABLE, maps:put(external_port, ExtPort, maps:put(version, Version, maps:put(name, Name, State#state.peer_info))))),
-		    enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 1, State#state.protocol_version)),
-		    user_joined_event(Name),
-        case application:get_env(motd) of
-            undefined -> ok;
-            {ok, Message} ->
-                lager:info("motd is ~p", [Message]),
-                enet:send_reliable(Channel, <<?PACKET_ANNOUNCEMENT:4/integer, 0:4/integer, Message/binary, 0>>)
-        end,
-        %% Send last match and activity info
-        send_activity_info(Channel),
-		    {noreply ,State#state{name = Name, version = Version, protocol_version = LobbyVersion, peer_info = PeerInfo2}}
-	    catch _:_ ->
-		    %% user already registered
-		    enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, ?JOIN_ERROR_NAME_USED:4/integer, ConnectID:32/integer-unsigned-big>>),
-		    {stop, normal, State}
-    end;
+handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyVersion:4/integer, ExtPort:16/integer-unsigned-big, MatchSettings:14/binary, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State = #state{name=undefined}) when LobbyVersion == 1 ->
+
+    do_join(State, ChannelID, LobbyVersion, ExtPort, Version, Name, MatchSettings);
+
 handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, Version:4/integer, _/binary>> }}, State = #state{name=undefined}) ->
     lager:info("client tried to connect with unsupported protocol version ~p", [Version]),
     PeerInfo = State#state.peer_info,
@@ -578,3 +550,37 @@ send_activity_info(Channel) ->
         _ ->
             ok
     end.
+
+do_join(State, ChannelID, LobbyVersion, ExtPort, Version, Name, MatchSettings) ->
+    lager:info("client has match settings of ~p", [MatchSettings]),
+    lager:info("client has named themselves ~s and has an external port of ~p", [Name, ExtPort]),
+    %% TODO check for a name conflict!
+    %% and that the name is not too long, etc
+    PeerInfo = State#state.peer_info,
+    Channels = maps:get(channels, PeerInfo),
+    Channel = maps:get(ChannelID, Channels),
+    ConnectID = maps:get(connect_id, PeerInfo),
+    try gproc:reg({n, l, {username, Name}}, self()) of
+        true ->
+            %% confirm the join and tell the user their connect ID
+            enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, 0:4/integer, ConnectID:32/integer-unsigned-big>>),
+            openomf_lobby_client_sup:client_presence(),
+            %% broadcast the user join...
+            PeerInfo2 = maps:put(match_settings, MatchSettings, maps:put(status, ?PRESENCE_AVAILABLE, maps:put(external_port, ExtPort, maps:put(version, Version, maps:put(name, Name, State#state.peer_info))))),
+            enet:broadcast_reliable(2098, 0, encode_peer_to_presence(PeerInfo2, 1, State#state.protocol_version)),
+            user_joined_event(Name),
+            case application:get_env(motd) of
+                undefined -> ok;
+                {ok, Message} ->
+                    lager:info("motd is ~p", [Message]),
+                    enet:send_reliable(Channel, <<?PACKET_ANNOUNCEMENT:4/integer, 0:4/integer, Message/binary, 0>>)
+            end,
+            %% Send last match and activity info
+            send_activity_info(Channel),
+            {noreply ,State#state{name = Name, version = Version, protocol_version = LobbyVersion, peer_info = PeerInfo2}}
+    catch _:_ ->
+              %% user already registered
+              enet:send_reliable(Channel, <<?PACKET_JOIN:4/integer, ?JOIN_ERROR_NAME_USED:4/integer, ConnectID:32/integer-unsigned-big>>),
+              {stop, normal, State}
+    end.
+
