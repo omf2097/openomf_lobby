@@ -72,7 +72,7 @@ handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
 
-handle_cast({send_to_discord, Message}, State = #state{port = undefined}) ->
+handle_cast({send_to_discord, _Message}, State = #state{port = undefined}) ->
     %% Discord bot not running, silently ignore
     {noreply, State};
 
