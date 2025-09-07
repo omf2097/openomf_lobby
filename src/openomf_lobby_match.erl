@@ -39,7 +39,11 @@
           arena_id :: undefined | non_neg_integer(),
           subscribers = [] :: [{term(), non_neg_integer(), pid()}],
           proposed_rands = [] :: [{integer(), integer()}],
-          confirmed_rand = 0 :: integer()
+          confirmed_rand = 0 :: integer(),
+          challenger_last_action = 0 :: non_neg_integer(),
+          challengee_last_action = 0 :: non_neg_integer(),
+          challenger_last_input_tick = 0 :: non_neg_integer(),
+          challengee_last_input_tick = 0 :: non_neg_integer()
          }).
 
 -define(QUIPS, ["~s sent ~s straight to the scrap heap... with a warranty void receipt!",
@@ -294,8 +298,8 @@ handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_
     end,
 
     Events = maps:put(LastTick, Event2, maps:put(LastHashTick, maps:put(HashKey, LastHash, Event0), Data#state.events)),
-    NewEvents = insert_events(Events, EventKey, Rest),
-    NewData = Data#state{events=NewEvents},
+    {NewEvents, UpdatedData} = insert_events(Events, EventKey, Rest, Data),
+    NewData = UpdatedData#state{events=NewEvents},
     %% TODO cache the last confirm frame in the state
     notify_subscribers(NewData, confirm_frame(Data#state.events, 0)),
     {keep_state, NewData};
@@ -388,18 +392,73 @@ quip(Winner, Loser) ->
     openomf_lobby_client_sup:record_last_match(Winner, Loser),
     openomf_lobby_discord_port:send_match_result(Winner, Loser, Bin).
 
-insert_events(Events, _, <<>>) ->
-    Events;
-insert_events(Events, Key, <<Tick:32/integer-unsigned-big, Rest/binary>>) ->
-    Event = maps:get(Tick, Events, #{}),
+
+
+%% Implement C client deduplication logic
+insert_events(Events, _, <<>>, Data) ->
+    {Events, Data};
+insert_events(Events, Key, <<Tick:32/integer-unsigned-big, Rest/binary>>, Data) ->
+    % Get maximum tick seen from this specific peer to detect stale events
+    MaxTickFromPeer = case maps:size(Events) of
+        0 -> 0;
+        _ ->
+            TicksWithPeerData = [T || {T, EventMap} <- maps:to_list(Events), maps:is_key(Key, EventMap)],
+            case TicksWithPeerData of
+                [] -> 0;
+                _ -> lists:max(TicksWithPeerData)
+            end
+    end,
     {Inputs, NextBin} = get_inputs(Rest),
-    NewEvents = case Inputs of
-                    [] ->
-                        Events;
-                    _ ->
-                        maps:put(Tick, maps:put(Key, Inputs, Event), Events)
-                end,
-    insert_events(NewEvents, Key, NextBin).
+    case Tick > MaxTickFromPeer of
+        true ->
+            % Apply C client deduplication logic
+            case should_filter_event(Inputs, Key, Tick, Data) of
+                true ->
+                    % Event filtered out - continue with next without adding to events
+                    insert_events(Events, Key, NextBin, Data);
+                false ->
+                    % Event passes filter - add to events and update dedup state
+                    Event = maps:get(Tick, Events, #{}),
+                    NewEvents = maps:put(Tick, maps:put(Key, Inputs, Event), Events),
+                    UpdatedData = update_dedup_state(Inputs, Key, Tick, Data),
+                    insert_events(NewEvents, Key, NextBin, UpdatedData)
+            end;
+        false ->
+            % Stale tick - ignore remaining events this tick
+            insert_events(Events, Key, NextBin, Data)
+    end.
+
+%% Match C client deduplication logic
+should_filter_event(Inputs, Key, Tick, Data) ->
+    case Inputs of
+        [] ->
+            Action = 0;
+        [FirstAction|_] ->
+            Action = FirstAction
+    end,
+
+    case Key of
+        challenger_events ->
+            Tick >= Data#state.challenger_last_input_tick andalso
+            Data#state.challenger_last_action == Action;
+        challengee_events ->
+            Tick >= Data#state.challengee_last_input_tick andalso
+            Data#state.challengee_last_action == Action
+    end.
+
+%% Update deduplication state like C client
+update_dedup_state(Inputs, Key, Tick, Data) ->
+    Action = case Inputs of
+        [] -> 0;
+        [FirstAction|_] -> FirstAction
+    end,
+
+    case Key of
+        challenger_events ->
+            Data#state{challenger_last_action = Action, challenger_last_input_tick = Tick};
+        challengee_events ->
+            Data#state{challengee_last_action = Action, challengee_last_input_tick = Tick}
+    end.
 
 
 get_inputs(Bin) ->
