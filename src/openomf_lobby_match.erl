@@ -167,7 +167,7 @@ connected({call, From}, {subscribe, Channel, Pid, ProtocolVersion, SuccessFun}, 
     SuccessFun(),
 
     %% if both players have picked their pilots, send the info any any confirmed inputs
-    case Data#state.challenger_pilot /= undefined andalso Data#state.challengee_pilot /= undefined of
+    case Data#state.challenger_pilot /= undefined andalso Data#state.challengee_pilot /= undefined andalso Data#state.confirmed_rand /= 0 of
         true ->
             MatchSettings = maps:get(match_settings, Data#state.challengee_info),
             Packet0 = encode_match_data(Data#state.challenger_pilot, Data#state.challengee_pilot, Data#state.arena_id, Data#state.confirmed_rand, ProtocolVersion, MatchSettings),
@@ -225,6 +225,9 @@ handle_event(connected, cast, {enet, _Pid, 2, #reliable{ data = <<?EVENT_TYPE_CO
     Seed = case lists:keyfind(PeerProposal, 1, Data#state.proposed_rands) of
                {PeerProposal, S} ->
                    S;
+               %% ordering problem?
+               false -> PeerProposal;
+               %% disagreement??
                _ -> 0
            end,
     {keep_state, Data#state{confirmed_rand=Seed}};
