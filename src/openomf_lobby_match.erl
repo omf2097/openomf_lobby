@@ -181,7 +181,7 @@ connected({call, From}, {subscribe, Channel, Pid, ProtocolVersion, SuccessFun}, 
             [ enet:send_reliable(Channel, iolist_to_binary([<<1:8/integer-unsigned>>, P])) || P <- Packets ],
             true;
         false ->
-            lager:info("match not started yet, having subscriber wait"),
+            lager:info("match not started yet (challenger ~p, challenge ~p, seed ~p), having subscriber wait", [Data#state.challenger_pilot /= undefined, Data#state.challengee_pilot /= undefined, Data#state.confirmed_rand /= undefined]),
             false
     end,
     %% add the pid to the subscription list
