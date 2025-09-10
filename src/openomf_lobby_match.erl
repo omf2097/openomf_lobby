@@ -516,7 +516,8 @@ encode_inputs([{Tick, Map}|T], Acc) ->
             encode_inputs(T, [P | Acc]);
         false ->
             encode_inputs(T, Acc)
-    end;
+    end.
+
 packetize(IoList, Size) ->
     packetize(IoList, Size, [], []).
 
