@@ -509,9 +509,14 @@ notify_subscribers(Data = #state{subscribers=Subs, events=Events}, PreviousConfi
 encode_inputs([], Acc) ->
     lists:reverse(Acc);
 encode_inputs([{Tick, Map}|T], Acc) ->
-    P = [<<Tick:32/integer-unsigned-big>>, << <<I:8/integer>> || I <- maps:get(challenger_events, Map, []) ++ [0] >>, << <<I:8/integer>> || I <- maps:get(challengee_events, Map, []) ++ [0] >>],
-    %lager:info("encoding event packet ~p", [P]),
-    encode_inputs(T, [P | Acc]).
+    case maps:is_key(challenger_events, Map) orelse maps:is_key(challengee_events, Map) of
+        true ->
+            P = [<<Tick:32/integer-unsigned-big>>, << <<I:8/integer>> || I <- maps:get(challenger_events, Map, []) ++ [0] >>, << <<I:8/integer>> || I <- maps:get(challengee_events, Map, []) ++ [0] >>],
+            %lager:info("encoding event packet ~p", [P]),
+            encode_inputs(T, [P | Acc]);
+        false ->
+            encode_inputs(T, Acc)
+    end;
 packetize(IoList, Size) ->
     packetize(IoList, Size, [], []).
 
