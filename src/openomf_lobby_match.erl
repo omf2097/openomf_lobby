@@ -503,7 +503,7 @@ notify_subscribers(Data = #state{subscribers=Subs, events=Events}, PreviousConfi
     %% find all the new events between the previous confirmed frame and the new one that have events
     L = [E || {T, M} = E <- lists:keysort(1, maps:to_list(Events)), T > PreviousConfirmed, T =< Confirmed, maps:is_key(challenger_events, M) orelse maps:is_key(challengee_events, M) ],
     Packet = encode_inputs(L, []),
-    [ enet:send_reliable(Channel, iolist_to_binary([<<1:8/integer-unsigned>>, Packet])) || {Channel, _PV, _Pid, MatchStarted} <- Subs, MatchStarted == true ],
+    [ enet:send_reliable(Channel, iolist_to_binary([<<1:8/integer-unsigned>>, Packet])) || {Channel, _PV, _Pid, _MatchStarted} <- Subs ],
     ok.
 
 encode_inputs([], Acc) ->
