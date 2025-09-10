@@ -217,21 +217,28 @@ handle_info({enet, ChannelID, Event}, State = #state{match_pid = MatchPid}) when
     %% packets other than channel 0 are for fights
     %% check if we're relaying, so we can send direct
     Channel = maps:get(ChannelID, State#state.relays, undefined),
+    FirstByte =
     case Channel of
         undefined ->
-            ok;
+            0;
         RelayChannel when is_record(Event, reliable) ->
-            enet:send_reliable(RelayChannel, Event#reliable.data);
+            enet:send_reliable(RelayChannel, Event#reliable.data),
+            binary:first(Event#reliable.data);
         RelayChannel when is_record(Event, unsequenced) ->
-            enet:send_unsequenced(RelayChannel, Event#unsequenced.data);
+            enet:send_unsequenced(RelayChannel, Event#unsequenced.data),
+            binary:first(Event#unsequenced.data);
         RelayChannel when is_record(Event, unreliable) ->
-            enet:send_unreliable(RelayChannel, Event#unreliable.data)
+            enet:send_unreliable(RelayChannel, Event#unreliable.data),
+            binary:first(Event#unreliable.data)
     end,
 
-    case ChannelID == 2 of
-        true ->
+    case ChannelID of
+        2 ->
             %% channel 2 packets are the event packets, so we want them in the match pid
             %% we will always get these
+            gen_statem:cast(MatchPid, {enet, self(), 2, Event});
+        1 when Channel /= undefined andalso FirstByte > 1 andalso FirstByte < 4 ->
+            %% PROPOSE/CONFIRM START when the match is relayed
             gen_statem:cast(MatchPid, {enet, self(), 2, Event});
         _ ->
             ok
@@ -239,7 +246,7 @@ handle_info({enet, ChannelID, Event}, State = #state{match_pid = MatchPid}) when
     {noreply, State};
 
 
-handle_info({enet, _ChannelID, #unsequenced{ data = Packet }}, State) ->
+handle_info({enet, _ChannelID, #unsequenced{ data = _Packet }}, State) ->
     %lager:info("got unsequenced packet ~p", [Packet]),
     {noreply, State};
 handle_info({enet, _ChannelID, #unreliable{ data = Packet }}, State) ->
