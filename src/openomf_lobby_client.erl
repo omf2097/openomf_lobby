@@ -240,7 +240,7 @@ handle_info({enet, ChannelID, Event}, State = #state{match_pid = MatchPid}) when
 
 
 handle_info({enet, _ChannelID, #unsequenced{ data = Packet }}, State) ->
-    lager:info("got unsequenced packet ~p", [Packet]),
+    %lager:info("got unsequenced packet ~p", [Packet]),
     {noreply, State};
 handle_info({enet, _ChannelID, #unreliable{ data = Packet }}, State) ->
     lager:info("got unreliable packet ~p", [Packet]),

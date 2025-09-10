@@ -509,7 +509,7 @@ encode_inputs([], Acc) ->
     lists:reverse(Acc);
 encode_inputs([{Tick, Map}|T], Acc) ->
     P = [<<Tick:32/integer-unsigned-big>>, << <<I:8/integer>> || I <- maps:get(challenger_events, Map, []) ++ [0] >>, << <<I:8/integer>> || I <- maps:get(challengee_events, Map, []) ++ [0] >>],
-    lager:info("encoding event packet ~p", [P]),
+    %lager:info("encoding event packet ~p", [P]),
     encode_inputs(T, [P | Acc]).
 packetize(IoList, Size) ->
     packetize(IoList, Size, [], []).
@@ -532,6 +532,6 @@ encode_match_data(Pilot1, Pilot2, ArenaID, Seed, _, MatchSettings) ->
 
 
 encode_pilot(#pilot{har_id = HARId, pilot_id = PilotId, power = Power, agility = Agility, endurance = Endurance, primary_color = C1, secondary_color = C2, tertiary_color = C3, name = Name}) ->
-    lager:info("encoding pilot ~p", [Name]),
+    %lager:info("encoding pilot ~p", [Name]),
     NameLen = byte_size(Name),
     <<HARId:8/integer-unsigned, PilotId:8/integer-unsigned, Power:8/integer-unsigned, Agility:8/integer-unsigned, Endurance:8/integer-unsigned, C1:8/integer-unsigned, C2:8/integer-unsigned, C3:8/integer-unsigned, NameLen:8/integer, Name/binary>>.
