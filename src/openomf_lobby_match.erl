@@ -481,7 +481,7 @@ confirm_frame(Events, LastConfirmed) ->
 
 check_send_start(NewData) ->
     %% check if we have just now gotten information from both sides
-    case NewData#state.challenger_pilot /= undefined andalso NewData#state.challengee_pilot /= undefined andalso NewData#state.confirmed_rand /= 0 of
+    case NewData#state.challenger_pilot /= undefined andalso NewData#state.challengee_pilot /= undefined andalso NewData#state.confirmed_rand /= undefined of
         true ->
             MatchSettings = maps:get(match_settings, NewData#state.challengee_info),
             %% send the starting information to all waiting subscribers
