@@ -37,9 +37,9 @@
           challengee_won = undefined :: undefined | boolean(),
           events = maps:new() :: map(),
           arena_id :: undefined | non_neg_integer(),
-          subscribers = [] :: [{term(), non_neg_integer(), pid()}],
+          subscribers = [] :: [{term(), non_neg_integer(), pid(), boolean()}],
           proposed_rands = [] :: [{integer(), integer()}],
-          confirmed_rand = 0 :: integer(),
+          confirmed_rand = undefined :: undefined | integer(),
           challenger_last_action = 0 :: non_neg_integer(),
           challengee_last_action = 0 :: non_neg_integer(),
           challenger_last_input_tick = 0 :: non_neg_integer(),
@@ -167,7 +167,8 @@ connected({call, From}, {subscribe, Channel, Pid, ProtocolVersion, SuccessFun}, 
     SuccessFun(),
 
     %% if both players have picked their pilots, send the info any any confirmed inputs
-    case Data#state.challenger_pilot /= undefined andalso Data#state.challengee_pilot /= undefined andalso Data#state.confirmed_rand /= 0 of
+    MatchStarted =
+    case Data#state.challenger_pilot /= undefined andalso Data#state.challengee_pilot /= undefined andalso Data#state.confirmed_rand /= undefined of
         true ->
             MatchSettings = maps:get(match_settings, Data#state.challengee_info),
             Packet0 = encode_match_data(Data#state.challenger_pilot, Data#state.challengee_pilot, Data#state.arena_id, Data#state.confirmed_rand, ProtocolVersion, MatchSettings),
@@ -177,12 +178,13 @@ connected({call, From}, {subscribe, Channel, Pid, ProtocolVersion, SuccessFun}, 
             Packet = encode_inputs(L, []),
             %% this might be big, so break it into 500 byte chunks
             Packets = packetize(Packet, 500),
-            [ enet:send_reliable(Channel, iolist_to_binary([<<1:8/integer-unsigned>>, P])) || P <- Packets ];
+            [ enet:send_reliable(Channel, iolist_to_binary([<<1:8/integer-unsigned>>, P])) || P <- Packets ],
+            true;
         false ->
-            ok
+            false
     end,
     %% add the pid to the subscription list
-    {keep_state, Data#state{subscribers = [{Channel, ProtocolVersion, Ref} | Subs]}, [{reply, From, ok}]};
+    {keep_state, Data#state{subscribers = [{Channel, ProtocolVersion, Ref, MatchStarted} | Subs]}, [{reply, From, ok}]};
 connected(Type, Event, Data) ->
     handle_event(?FUNCTION_NAME, Type, Event, Data).
 
@@ -199,21 +201,15 @@ handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAM
                   _ ->
                       Data
               end,
-    %% check if we have just now gotten information from both sides
-    case Data /= NewData andalso NewData#state.challenger_pilot /= undefined andalso NewData#state.challengee_pilot /= undefined of
+    FinalData =
+    case Data /= NewData of
         true ->
-            MatchSettings = maps:get(match_settings, Data#state.challengee_info),
-            %% send the starting information to all waiting subscribers
-            lists:foreach(
-              fun({Channel, ProtocolVersion, _Ref}) ->
-                      Packet0 = encode_match_data(NewData#state.challenger_pilot, NewData#state.challengee_pilot, NewData#state.arena_id, Data#state.confirmed_rand, ProtocolVersion, MatchSettings),
-                      enet:send_reliable(Channel, Packet0)
-              end, NewData#state.subscribers);
+            check_send_start(NewData);
         false ->
-            ok
+            NewData
     end,
 
-    {keep_state, NewData};
+    {keep_state, FinalData};
 
 
 handle_event(connected, cast, {enet, _Pid, 2, #reliable{ data = <<?EVENT_TYPE_PROPOSE_START:8/integer, PeerProposal:32/integer-unsigned-big, _LocalProposal:32/integer-unsigned-big, Seed:32/integer-unsigned-big>>}}, Data) ->
@@ -226,11 +222,20 @@ handle_event(connected, cast, {enet, _Pid, 2, #reliable{ data = <<?EVENT_TYPE_CO
                {PeerProposal, S} ->
                    S;
                %% ordering problem?
-               false -> PeerProposal;
-               %% disagreement??
-               _ -> 0
+               false ->
+                   lager:warning("saw confirm start without propose start"),
+                   0
            end,
-    {keep_state, Data#state{confirmed_rand=Seed}};
+    NewData = Data#state{confirmed_rand=Seed},
+    FinalData =
+    case Data /= NewData of
+        true ->
+            check_send_start(NewData);
+        false ->
+            NewData
+    end,
+
+    {keep_state, FinalData};
 
 
 handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAME_INFO:8/integer, ArenaID:8/integer-unsigned, HARId:8/integer-unsigned,
@@ -247,21 +252,15 @@ handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAM
                   _ ->
                       Data
               end,
-    %% check if we have just now gotten information from both sides
-    case Data /= NewData andalso NewData#state.challenger_pilot /= undefined andalso NewData#state.challengee_pilot /= undefined of
+    FinalData =
+    case NewData /= Data of
         true ->
-            MatchSettings = maps:get(match_settings, Data#state.challengee_info),
-            %% send the starting information to all waiting subscribers
-            lists:foreach(
-              fun({Channel, ProtocolVersion, _Ref}) ->
-                      Packet0 = encode_match_data(NewData#state.challenger_pilot, NewData#state.challengee_pilot, NewData#state.arena_id, Data#state.confirmed_rand, ProtocolVersion, MatchSettings),
-                      enet:send_reliable(Channel, Packet0)
-              end, NewData#state.subscribers);
+            check_send_start(NewData);
         false ->
-            ok
+            NewData
     end,
 
-    {keep_state, NewData};
+    {keep_state, FinalData};
 
 
 handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_ACTION:8/integer, LastReceivedTick:32/integer-signed-big, LastHashTick:32/integer-unsigned-big, LastHash:32/integer-unsigned-big, LastTick:32/integer-unsigned-big, Rest0/binary>>}}, Data) ->
@@ -480,12 +479,30 @@ confirm_frame(Events, LastConfirmed) ->
     ChallengeeLastReceived = max(LastConfirmed, lists:max([0 | [ E || E <- ChallengeeLastReceiveds]])),
     min(ChallengerLastReceived, ChallengeeLastReceived).
 
+check_send_start(NewData) ->
+    %% check if we have just now gotten information from both sides
+    case NewData#state.challenger_pilot /= undefined andalso NewData#state.challengee_pilot /= undefined andalso NewData#state.confirmed_rand /= 0 of
+        true ->
+            MatchSettings = maps:get(match_settings, NewData#state.challengee_info),
+            %% send the starting information to all waiting subscribers
+            NewSubs =
+            lists:map(
+              fun({Channel, ProtocolVersion, _Ref, false}) ->
+                      Packet0 = encode_match_data(NewData#state.challenger_pilot, NewData#state.challengee_pilot, NewData#state.arena_id, NewData#state.confirmed_rand, ProtocolVersion, MatchSettings),
+                      enet:send_reliable(Channel, Packet0),
+                      {Channel, ProtocolVersion, _Ref, true}
+              end, NewData#state.subscribers),
+            NewData#state{subscribers=NewSubs};
+        false ->
+            NewData
+    end.
+
 notify_subscribers(Data = #state{subscribers=Subs, events=Events}, PreviousConfirmed) ->
     Confirmed = confirm_frame(Data#state.events, PreviousConfirmed),
     %% find all the new events between the previous confirmed frame and the new one that have events
     L = [E || {T, M} = E <- lists:keysort(1, maps:to_list(Events)), T > PreviousConfirmed, T =< Confirmed, maps:is_key(challenger_events, M) orelse maps:is_key(challengee_events, M) ],
     Packet = encode_inputs(L, []),
-    [ enet:send_reliable(Channel, iolist_to_binary([<<1:8/integer-unsigned>>, Packet])) || {Channel, _PV, _Pid} <- Subs ],
+    [ enet:send_reliable(Channel, iolist_to_binary([<<1:8/integer-unsigned>>, Packet])) || {Channel, _PV, _Pid, MatchStarted} <- Subs, MatchStarted == true ],
     ok.
 
 encode_inputs([], Acc) ->
