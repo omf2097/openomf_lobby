@@ -122,7 +122,20 @@ challenging(Type, Event, Data) ->
 
 
 connecting(enter, _OldState, _Data) ->
-    keep_state_and_data;
+    {keep_state_and_data, [{state_timeout, 15000, connection_timeout}]};
+connecting(state_timeout, connection_timeout, Data) ->
+    %% timed out waiting for both sides to connect, try relay
+    case Data#state.challenger_connected orelse Data#state.challengee_connected of
+        true ->
+            %% one side connected, try relay for the other
+            lager:info("connection timeout, establishing relay"),
+            gen_server:cast(Data#state.challenger_pid, {relay, maps:get(channels, Data#state.challengee_info)}),
+            gen_server:cast(Data#state.challengee_pid, {relay, maps:get(channels, Data#state.challenger_info)}),
+            keep_state_and_data;
+        false ->
+            lager:warning("connection timeout, neither side connected"),
+            {stop, connection_timeout}
+    end;
 connecting(cast, {connected, ChallengerPid}, Data = #state{challenger_pid = ChallengerPid}) ->
     NewData = Data#state{challenger_connected = true},
     check_connected(NewData);
@@ -239,31 +252,6 @@ handle_event(connected, cast, {enet, _Pid, 2, #reliable{ data = <<?EVENT_TYPE_CO
     {keep_state, FinalData};
 
 
-handle_event(connected, cast, {enet, Pid, 2, #reliable{ data = <<?EVENT_TYPE_GAME_INFO:8/integer, ArenaID:8/integer-unsigned, HARId:8/integer-unsigned,
-                                                         Power:8/integer-unsigned, Agility:8/integer-unsigned, Endurance:8/integer-unsigned,
-                                                         PrimaryColor:8/integer-unsigned, SecondaryColor:8/integer-unsigned, TertiaryColor:8/integer-unsigned,
-                                                         NameLen:8/integer-unsigned, Name:NameLen/binary>>}}, Data) ->
-    %% XXX legacy version, remove after 0.8.2+
-    Pilot = #pilot{har_id = HARId, pilot_id = 0, power = Power, endurance = Endurance, agility = Agility, primary_color = PrimaryColor, secondary_color = SecondaryColor, tertiary_color = TertiaryColor, name = Name},
-    NewData = case Pid of
-                  _ when Pid == Data#state.challenger_pid andalso Data#state.challenger_pilot == undefined ->
-                      Data#state{challenger_pilot = Pilot, arena_id =ArenaID};
-                  _ when Pid == Data#state.challengee_pid andalso Data#state.challengee_pilot == undefined ->
-                      Data#state{challengee_pilot = Pilot, arena_id = ArenaID};
-                  _ ->
-                      Data
-              end,
-    FinalData =
-    case NewData /= Data of
-        true ->
-            check_send_start(NewData);
-        false ->
-            NewData
-    end,
-
-    {keep_state, FinalData};
-
-
 handle_event(connected, cast, {enet, Pid, 2, #unsequenced{ data = <<?EVENT_TYPE_ACTION:8/integer, LastReceivedTick:32/integer-signed-big, LastHashTick:32/integer-unsigned-big, LastHash:32/integer-unsigned-big, LastTick:32/integer-unsigned-big, Rest0/binary>>}}, Data) ->
 
     %% 0.8.1 lacked the backup ticks field
@@ -315,7 +303,7 @@ handle_event(_State, cast, {done, Pid}, Data = #state{challenger_pid = Pid, chal
     check_winner(NewData);
 handle_event(_State, cast, {done, Pid}, Data = #state{challengee_pid = Pid, challengee_won=undefined}) ->
     lager:info("~p reports match is finished abnormally", [Pid]),
-    NewData = Data#state{challenger_won = false},
+    NewData = Data#state{challengee_won = false},
     case check_winner(NewData) of
         {keep_state, NewerData} ->
             %% set a timeout to end this match if the other side doesn't report in
@@ -330,7 +318,7 @@ handle_event(_State, state_timeout, finish_match, _Data) ->
     lager:warning("ending match pid after one side failed to ever finish"),
     {stop, normal};
 handle_event(_State, info, {'DOWN', Ref, _, _}, Data = #state{subscribers = Subs}) ->
-    {keep_state, Data#state{subscribers=lists:filter(fun({_Channel, _PV, Ref0}) -> Ref == Ref0 end, Subs)}};
+    {keep_state, Data#state{subscribers=lists:filter(fun({_Channel, _PV, Ref0, _Started}) -> Ref /= Ref0 end, Subs)}};
 handle_event(State, Type, Event, _Data) ->
     lager:info("got unhandled event ~p ~p in state ~p", [Type, Event, State]),
     keep_state_and_data.
@@ -352,7 +340,7 @@ check_connected(NewData) ->
     {keep_state, NewData}.
 
 maybe_relay(NewData) ->
-    case NewData#state.challenger_connect_count == 4 andalso NewData#state.challenger_connect_count == 4 of
+    case NewData#state.challenger_connect_count >= 3 andalso NewData#state.challengee_connect_count >= 3 of
         true ->
             lager:info("Establishing relay between ~p and ~p", [maps:get(name, NewData#state.challenger_info), maps:get(name, NewData#state.challengee_info)]),
             gen_server:cast(NewData#state.challenger_pid, {relay, maps:get(channels, NewData#state.challengee_info)}),
@@ -532,8 +520,6 @@ packetize([Head | Tail]=Input, Size, ThisPacket, Packets) ->
             packetize(Input, Size, [], [lists:reverse(ThisPacket)|Packets])
     end.
 
-encode_match_data(Pilot1, Pilot2, ArenaID, Seed, 0, _MatchSettings) ->
-    iolist_to_binary([<<0:8/integer>>, encode_pilot(Pilot1), encode_pilot(Pilot2), <<Seed:32/integer-unsigned-big, ArenaID:8/integer-unsigned>>]);
 encode_match_data(Pilot1, Pilot2, ArenaID, Seed, _, MatchSettings) ->
     iolist_to_binary([<<0:8/integer>>, MatchSettings, encode_pilot(Pilot1), encode_pilot(Pilot2), <<Seed:32/integer-unsigned-big, ArenaID:8/integer-unsigned>>]).
 

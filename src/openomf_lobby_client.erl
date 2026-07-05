@@ -253,10 +253,6 @@ handle_info({enet, _ChannelID, #unreliable{ data = Packet }}, State) ->
     lager:info("got unreliable packet ~p", [Packet]),
     {noreply, State};
 
-handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyVersion:4/integer, ExtPort:16/integer-unsigned-big, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State = #state{name=undefined}) when LobbyVersion == 0 ->
-
-    do_join(State, ChannelID, LobbyVersion, ExtPort, Version, Name, <<0:112/integer>>);
-
 handle_info({enet, ChannelID, #reliable{ data = <<?PACKET_JOIN:4/integer, LobbyVersion:4/integer, ExtPort:16/integer-unsigned-big, MatchSettings:14/binary, VersionLen:8/integer, Version:VersionLen/binary, Name/binary>> }}, State = #state{name=undefined}) when LobbyVersion == 1 ->
 
     do_join(State, ChannelID, LobbyVersion, ExtPort, Version, Name, MatchSettings);
